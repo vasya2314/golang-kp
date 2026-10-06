@@ -13,8 +13,9 @@ import (
 const movieReleaseAtLayout = "2006-01-02"
 
 type CreateMovieRequest struct {
-	Title     string `json:"title" validate:"required,min=3,max=100"`
-	ReleaseAt string `json:"release_at" validate:"required,datetime=2006-01-02"`
+	Title       string  `json:"title" validate:"required,min=3,max=100"`
+	Description *string `json:"description" validate:"omitempty,max=1000"`
+	ReleaseAt   string  `json:"release_at" validate:"required,datetime=2006-01-02"`
 }
 
 type CreateMovieResponse MovieDTOResponse
@@ -39,7 +40,7 @@ func (h *MovieHTTPHandler) CreateMovie(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	movieDomain := domain.NewMovieUninitialized(request.Title, year)
+	movieDomain := domain.NewMovieUninitialized(request.Title, request.Description, year)
 
 	movieDomain, err = h.movieService.CreateMovie(ctx, movieDomain)
 	if err != nil {

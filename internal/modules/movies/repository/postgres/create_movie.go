@@ -12,18 +12,19 @@ func (r *MovieRepository) CreateMovie(ctx context.Context, movie domain.Movie) (
 	defer cancel()
 
 	query := `
-	INSERT INTO movies (title, release_at)
-	VALUES ($1, $2)
-	RETURNING id, version, title, release_at;
+	INSERT INTO movies (title, description, release_at)
+	VALUES ($1, $2, $3)
+	RETURNING id, version, title, description, release_at;
 	`
 
-	row := r.pool.QueryRow(ctx, query, movie.Title, movie.ReleaseAt)
+	row := r.pool.QueryRow(ctx, query, movie.Title, movie.Description, movie.ReleaseAt)
 
 	var movieModel MovieModel
 	err := row.Scan(
 		&movieModel.ID,
 		&movieModel.Version,
 		&movieModel.Title,
+		&movieModel.Description,
 		&movieModel.ReleaseAt,
 	)
 	if err != nil {
@@ -34,6 +35,7 @@ func (r *MovieRepository) CreateMovie(ctx context.Context, movie domain.Movie) (
 		movieModel.ID,
 		movieModel.Version,
 		movieModel.Title,
+		movieModel.Description,
 		movieModel.ReleaseAt,
 	)
 

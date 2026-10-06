@@ -19,23 +19,26 @@ func (r *MovieRepository) PatchMovie(
 	UPDATE movies
 	SET
 		title=$1,
-		release_at=$2,
+		description=$2,
+		release_at=$3,
 		version=version+1
-	WHERE id=$3 AND version=$4
+	WHERE id=$4 AND version=$5
 	RETURNING
 		id,
 		version,
 		title,
+		description,
 		release_at;
 	`
 
-	row := r.pool.QueryRow(ctx, query, movie.Title, movie.ReleaseAt, id, movie.Version)
+	row := r.pool.QueryRow(ctx, query, movie.Title, movie.Description, movie.ReleaseAt, id, movie.Version)
 
 	var movieModel MovieModel
 	err := row.Scan(
 		&movieModel.ID,
 		&movieModel.Version,
 		&movieModel.Title,
+		&movieModel.Description,
 		&movieModel.ReleaseAt,
 	)
 	if err != nil {
@@ -46,6 +49,7 @@ func (r *MovieRepository) PatchMovie(
 		movieModel.ID,
 		movieModel.Version,
 		movieModel.Title,
+		movieModel.Description,
 		movieModel.ReleaseAt,
 	)
 

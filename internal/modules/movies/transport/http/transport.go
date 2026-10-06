@@ -28,6 +28,12 @@ type MovieService interface {
 		offset *int,
 	) ([]domain.Movie, error)
 
+	PatchMovie(
+		ctx context.Context,
+		id int,
+		moviePatch domain.MoviePatch,
+	) (domain.Movie, error)
+
 	DeleteMovie(
 		ctx context.Context,
 		id int,
@@ -46,5 +52,6 @@ func (h *MovieHTTPHandler) Routes(router *chi.Mux) {
 		r.Get("/", h.GetMovies)
 		r.Delete("/{id}", h.DeleteMovie)
 		r.Get("/{id}", h.GetMovie)
+		r.Patch("/{id}", h.PatchMovie)
 	})
 }

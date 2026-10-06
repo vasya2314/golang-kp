@@ -7,18 +7,20 @@ import (
 )
 
 type MovieDTOResponse struct {
-	ID        int       `json:"id"`
-	Version   int       `json:"version"`
-	Title     string    `json:"title"`
-	ReleaseAt time.Time `json:"release_at"`
+	ID          int       `json:"id"`
+	Version     int       `json:"version"`
+	Title       string    `json:"title"`
+	Description *string   `json:"description"`
+	ReleaseAt   time.Time `json:"release_at"`
 }
 
 func movieDTOFromDomain(movie domain.Movie) MovieDTOResponse {
 	return MovieDTOResponse{
-		ID:        movie.ID,
-		Version:   movie.Version,
-		Title:     movie.Title,
-		ReleaseAt: movie.ReleaseAt,
+		ID:          movie.ID,
+		Version:     movie.Version,
+		Title:       movie.Title,
+		Description: movie.Description,
+		ReleaseAt:   movie.ReleaseAt,
 	}
 }
 

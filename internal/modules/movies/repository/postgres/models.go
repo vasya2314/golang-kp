@@ -7,10 +7,11 @@ import (
 )
 
 type MovieModel struct {
-	ID        int
-	Version   int
-	Title     string
-	ReleaseAt time.Time
+	ID          int
+	Version     int
+	Title       string
+	Description *string
+	ReleaseAt   time.Time
 }
 
 func movieDomainsFromModels(movies []MovieModel) []domain.Movie {
@@ -21,6 +22,7 @@ func movieDomainsFromModels(movies []MovieModel) []domain.Movie {
 			movie.ID,
 			movie.Version,
 			movie.Title,
+			movie.Description,
 			movie.ReleaseAt,
 		)
 	}

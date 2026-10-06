@@ -27,6 +27,12 @@ type MovieRepository interface {
 		offset *int,
 	) ([]domain.Movie, error)
 
+	PatchMovie(
+		ctx context.Context,
+		id int,
+		movie domain.Movie,
+	) (domain.Movie, error)
+
 	DeleteMovie(
 		ctx context.Context,
 		id int,

@@ -8,10 +8,19 @@ import (
 	"strings"
 
 	"github.com/go-playground/validator/v10"
+	"github.com/vasya2314/golang-kp/internal/core/domain"
 	core_errors "github.com/vasya2314/golang-kp/internal/core/errors"
 )
 
 var requestValidator = newRequestValidator()
+
+type JsonNull struct{ Null bool } // поле обязательно, иначе omitempty сочтёт маркер пустым
+
+type optionalValue interface {
+	IsSet() bool
+	IsNull() bool
+	Any() any
+}
 
 // По умолчанию fe.Field() вернёт ReleaseAt, а хочется release_at. Для этого один раз при создании валидатора регистрируется функция, которая берёт имя из тега json
 func newRequestValidator() *validator.Validate {
@@ -24,6 +33,28 @@ func newRequestValidator() *validator.Validate {
 		}
 
 		return name
+	})
+
+	v.RegisterCustomTypeFunc(func(f reflect.Value) any {
+		o := f.Interface().(optionalValue)
+		switch {
+		case !o.IsSet(): // не передано
+			return nil
+		case o.IsNull(): // передан null
+			return JsonNull{Null: true}
+		default: // само значение
+			return o.Any()
+		}
+	}, domain.Optional[string]{}, domain.Optional[int]{})
+
+	v.RegisterValidation("notnull", func(fl validator.FieldLevel) bool {
+		_, isNull := fl.Field().Interface().(JsonNull)
+		return !isNull
+	})
+
+	v.RegisterValidation("null", func(fl validator.FieldLevel) bool {
+		_, isNull := fl.Field().Interface().(JsonNull)
+		return isNull
 	})
 
 	return v
@@ -55,11 +86,13 @@ func DecodeAndValidateRequest(r *http.Request, dest any) error {
 				msg = fmt.Sprintf("должно быть датой в формате %s", fe.Param())
 			case "min":
 				msg = fmt.Sprintf("минимальное значение/длина — %s", fe.Param())
+			case "max":
+				msg = fmt.Sprintf("максимальное значение/длина — %s", fe.Param())
 			}
 
 			fields = append(fields, NewFieldError(fe.Field(), msg))
 		}
-		
+
 		return NewValidationError(fields)
 	}
 
