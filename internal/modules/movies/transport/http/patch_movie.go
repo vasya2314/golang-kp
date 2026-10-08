@@ -20,7 +20,7 @@ type PatchMovieRequest struct {
 
 type PatchMovieResponse MovieDTOResponse
 
-func (h MovieHTTPHandler) PatchMovie(w http.ResponseWriter, r *http.Request) {
+func (h *MovieHTTPHandler) PatchMovie(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	log := core_logger.FromContext(ctx)
 	responseHandler := core_http_response.NewHTTPResponseHandler(log, w)
@@ -56,7 +56,7 @@ func (h MovieHTTPHandler) PatchMovie(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := PatchMovieResponse(movie)
+	response := PatchMovieResponse(movieDTOFromDomain(movie))
 
 	responseHandler.JSONResponse(response, http.StatusOK)
 }
@@ -69,7 +69,7 @@ func moviePatchFromRequest(request PatchMovieRequest) (domain.MoviePatch, error)
 
 	var releaseAt *time.Time
 	if request.ReleaseAt.Set {
-		t, err := time.Parse(movieReleaseAtLayout, request.ReleaseAt.Value)
+		t, err := time.Parse(domain.DateLayout, request.ReleaseAt.Value)
 		if err != nil {
 			return domain.MoviePatch{}, err
 		}

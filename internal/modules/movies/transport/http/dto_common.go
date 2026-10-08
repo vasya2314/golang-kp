@@ -1,17 +1,15 @@
 package movie_transport_http
 
 import (
-	"time"
-
 	"github.com/vasya2314/golang-kp/internal/core/domain"
 )
 
 type MovieDTOResponse struct {
-	ID          int       `json:"id"`
-	Version     int       `json:"version"`
-	Title       string    `json:"title"`
-	Description *string   `json:"description"`
-	ReleaseAt   time.Time `json:"release_at"`
+	ID          int     `json:"id"`
+	Version     int     `json:"version"`
+	Title       string  `json:"title"`
+	Description *string `json:"description"`
+	ReleaseAt   string  `json:"release_at"`
 }
 
 func movieDTOFromDomain(movie domain.Movie) MovieDTOResponse {
@@ -20,7 +18,7 @@ func movieDTOFromDomain(movie domain.Movie) MovieDTOResponse {
 		Version:     movie.Version,
 		Title:       movie.Title,
 		Description: movie.Description,
-		ReleaseAt:   movie.ReleaseAt,
+		ReleaseAt:   movie.ReleaseAt.Format(domain.DateLayout),
 	}
 }
 

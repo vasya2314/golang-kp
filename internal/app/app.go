@@ -11,6 +11,9 @@ import (
 	core_pgx_pool "github.com/vasya2314/golang-kp/internal/core/repository/postgres"
 	core_http_middleware "github.com/vasya2314/golang-kp/internal/core/transport/http/middleware"
 	core_http_server "github.com/vasya2314/golang-kp/internal/core/transport/http/server"
+	actor_postgres_repository "github.com/vasya2314/golang-kp/internal/modules/actors/repository/postgres"
+	actor_service "github.com/vasya2314/golang-kp/internal/modules/actors/service"
+	actor_transport_http "github.com/vasya2314/golang-kp/internal/modules/actors/transport"
 	movie_postgres_repository "github.com/vasya2314/golang-kp/internal/modules/movies/repository/postgres"
 	movie_service "github.com/vasya2314/golang-kp/internal/modules/movies/service"
 	movie_transport_http "github.com/vasya2314/golang-kp/internal/modules/movies/transport/http"
@@ -58,11 +61,18 @@ func Run() {
 	movieService := movie_service.NewMovieService(movieRepository)
 	movieTransportHTTP := movie_transport_http.NewMovieHTTPHandler(movieService)
 
+	logger.Debug("Initializing actor module")
+
+	actorRepository := actor_postgres_repository.NewActorRepository(*pool)
+	actorService := actor_service.NewActorService(actorRepository)
+	actorTransportHTTP := actor_transport_http.NewActorHTTPHandler(actorService)
+
 	logger.Debug("Initializing router")
 
 	apiVersionRouterV1 := core_http_server.NewAPIVersionRouter(core_http_server.ApiVersion1)
 
 	movieTransportHTTP.Routes(apiVersionRouterV1.Mux)
+	actorTransportHTTP.Routes(apiVersionRouterV1.Mux)
 
 	apiVersionRouterV1.RegisterRoutes(server.Mux)
 

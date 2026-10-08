@@ -10,8 +10,6 @@ import (
 	core_http_response "github.com/vasya2314/golang-kp/internal/core/transport/http/response"
 )
 
-const movieReleaseAtLayout = "2006-01-02"
-
 type CreateMovieRequest struct {
 	Title       string  `json:"title" validate:"required,min=3,max=100"`
 	Description *string `json:"description" validate:"omitempty,max=1000"`
@@ -33,9 +31,9 @@ func (h *MovieHTTPHandler) CreateMovie(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	year, err := time.Parse(movieReleaseAtLayout, request.ReleaseAt)
+	year, err := time.Parse(domain.DateLayout, request.ReleaseAt)
 	if err != nil {
-		responseHandler.ErrorResponse(err, "не удалось разобрать год")
+		responseHandler.ErrorResponse(err, "дата указана в неверном формате")
 
 		return
 	}
