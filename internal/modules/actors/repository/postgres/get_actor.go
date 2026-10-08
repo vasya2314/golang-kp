@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/vasya2314/golang-kp/internal/core/domain"
+	core_errors "github.com/vasya2314/golang-kp/internal/core/errors"
 )
 
 func (r *ActorRepository) GetActor(ctx context.Context, id int) (domain.Actor, error) {
@@ -29,7 +30,7 @@ func (r *ActorRepository) GetActor(ctx context.Context, id int) (domain.Actor, e
 		&actorModel.BirthDate)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return domain.Actor{}, fmt.Errorf("актер/актриса с id %d не найден", id)
+			return domain.Actor{}, fmt.Errorf("актер/актриса с id %d не найден: %w", id, core_errors.ErrNotFound)
 		}
 
 		return domain.Actor{}, fmt.Errorf("ошибка чтения строки: %w", err)

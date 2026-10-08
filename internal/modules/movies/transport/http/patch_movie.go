@@ -1,12 +1,14 @@
 package movie_transport_http
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/vasya2314/golang-kp/internal/core/domain"
+	core_errors "github.com/vasya2314/golang-kp/internal/core/errors"
 	core_logger "github.com/vasya2314/golang-kp/internal/core/logger"
 	core_http_request "github.com/vasya2314/golang-kp/internal/core/transport/http/request"
 	core_http_response "github.com/vasya2314/golang-kp/internal/core/transport/http/response"
@@ -29,6 +31,7 @@ func (h *MovieHTTPHandler) PatchMovie(w http.ResponseWriter, r *http.Request) {
 
 	id, err := strconv.Atoi(idString)
 	if err != nil {
+		err = fmt.Errorf("получение `id`: %w", core_errors.ErrInvalidArgument)
 		responseHandler.ErrorResponse(err, "некорректный параметр id")
 
 		return

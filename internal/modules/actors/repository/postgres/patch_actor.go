@@ -2,9 +2,12 @@ package actor_postgres_repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/vasya2314/golang-kp/internal/core/domain"
+	core_errors "github.com/vasya2314/golang-kp/internal/core/errors"
 )
 
 func (r *ActorRepository) PatchActor(
@@ -48,6 +51,14 @@ func (r *ActorRepository) PatchActor(
 		&actorModel.BirthDate,
 	)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.Actor{}, fmt.Errorf(
+				"актер/актриса с id='%d' конкурентный доступ: %w",
+				id,
+				core_errors.ErrConflict,
+			)
+		}
+
 		return domain.Actor{}, fmt.Errorf("ошибка чтения результата: %w", err)
 	}
 

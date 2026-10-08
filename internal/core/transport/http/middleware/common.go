@@ -72,23 +72,23 @@ func Trace() Middleware {
 	}
 }
 
-//func Panic() Middleware {
-//	return func(next http.Handler) http.Handler {
-//		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-//			ctx := r.Context()
-//			log := core_logger.FromContext(ctx)
-//			responseHandler := core_http_response.NewHTTPResponseHandler(log, w)
-//
-//			defer func() {
-//				if p := recover(); p != nil {
-//					responseHandler.PanicResponse(
-//						p,
-//						"непредвиденная паника при обработке HTTP-запроса",
-//					)
-//				}
-//			}()
-//
-//			next.ServeHTTP(w, r)
-//		})
-//	}
-//}
+func Panic() Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
+			log := core_logger.FromContext(ctx)
+			responseHandler := core_http_response.NewHTTPResponseHandler(log, w)
+
+			defer func() {
+				if p := recover(); p != nil {
+					responseHandler.PanicResponse(
+						p,
+						"непредвиденная паника при обработке HTTP-запроса",
+					)
+				}
+			}()
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}

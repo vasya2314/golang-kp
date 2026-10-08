@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/vasya2314/golang-kp/internal/core/domain"
+	core_errors "github.com/vasya2314/golang-kp/internal/core/errors"
 )
 
 func (r *MovieRepository) GetMovie(ctx context.Context, id int) (domain.Movie, error) {
@@ -28,7 +29,7 @@ func (r *MovieRepository) GetMovie(ctx context.Context, id int) (domain.Movie, e
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return domain.Movie{}, fmt.Errorf("фильм с id %d не найден", id)
+			return domain.Movie{}, fmt.Errorf("фильм с id %d не найден: %w", id, core_errors.ErrNotFound)
 		}
 
 		return domain.Movie{}, fmt.Errorf("ошибка чтения строки: %w", err)

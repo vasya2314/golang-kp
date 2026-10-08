@@ -1,9 +1,11 @@
 package movie_transport_http
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 
+	core_errors "github.com/vasya2314/golang-kp/internal/core/errors"
 	core_logger "github.com/vasya2314/golang-kp/internal/core/logger"
 	core_http_response "github.com/vasya2314/golang-kp/internal/core/transport/http/response"
 )
@@ -20,6 +22,7 @@ func (h *MovieHTTPHandler) GetMovies(w http.ResponseWriter, r *http.Request) {
 	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
 		o, err := strconv.Atoi(offsetStr)
 		if err != nil {
+			err = fmt.Errorf("получение `offset`: %w", core_errors.ErrInvalidArgument)
 			responseHandler.ErrorResponse(err, "неверное значение параметра `offset`")
 
 			return
@@ -33,6 +36,7 @@ func (h *MovieHTTPHandler) GetMovies(w http.ResponseWriter, r *http.Request) {
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
 		l, err := strconv.Atoi(limitStr)
 		if err != nil {
+			err = fmt.Errorf("получение `limit`: %w", core_errors.ErrInvalidArgument)
 			responseHandler.ErrorResponse(err, "неверное значение параметра `limit`")
 
 			return

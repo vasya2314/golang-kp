@@ -2,9 +2,12 @@ package movie_postgres_repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/vasya2314/golang-kp/internal/core/domain"
+	core_errors "github.com/vasya2314/golang-kp/internal/core/errors"
 )
 
 func (r *MovieRepository) PatchMovie(
@@ -42,6 +45,14 @@ func (r *MovieRepository) PatchMovie(
 		&movieModel.ReleaseAt,
 	)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.Movie{}, fmt.Errorf(
+				"фильм с id='%d' конкурентный доступ: %w",
+				id,
+				core_errors.ErrConflict,
+			)
+		}
+
 		return domain.Movie{}, fmt.Errorf("ошибка чтения результата: %w", err)
 	}
 
