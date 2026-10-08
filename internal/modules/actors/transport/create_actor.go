@@ -14,7 +14,7 @@ type CreateActorRequest struct {
 	FirstName   string  `json:"first_name" validate:"required,max=100"`
 	LastName    string  `json:"last_name" validate:"required,max=100"`
 	MiddleName  *string `json:"middle_name" validate:"omitempty,max=100"`
-	Description *string `json:"description" validate:"omitempty,max=100"`
+	Description *string `json:"description" validate:"omitempty,max=1000"`
 	BirthDate   string  `json:"birth_date" validate:"required,datetime=2006-01-02"`
 }
 

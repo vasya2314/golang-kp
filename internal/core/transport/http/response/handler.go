@@ -98,7 +98,11 @@ func (h *HTTPResponseHandler) errorResponse(
 
 	response := map[string]string{
 		"message": msg,
-		"error":   err.Error(),
+	}
+
+	// Текст внутренних ошибок (SQL, паники) клиенту не отдаём — он уже записан в лог
+	if statusCode < http.StatusInternalServerError {
+		response["error"] = err.Error()
 	}
 
 	h.JSONResponse(response, statusCode)

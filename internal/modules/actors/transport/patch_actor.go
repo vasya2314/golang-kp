@@ -17,8 +17,8 @@ import (
 type PatchActorRequest struct {
 	FirstName   domain.Optional[string] `json:"first_name" validate:"omitempty,notnull,min=1,max=100"`
 	LastName    domain.Optional[string] `json:"last_name" validate:"omitempty,notnull,min=1,max=100"`
-	MiddleName  domain.Optional[string] `json:"middle_name" validate:"omitempty,null|min=1,max=100"`
-	Description domain.Optional[string] `json:"description" validate:"omitempty,null|min=1,max=1000"`
+	MiddleName  domain.Optional[string] `json:"middle_name" validate:"omitempty,null|min=1,null|max=100"`
+	Description domain.Optional[string] `json:"description" validate:"omitempty,null|min=1,null|max=1000"`
 	BirthDate   domain.Optional[string] `json:"birth_date" validate:"omitempty,notnull,datetime=2006-01-02"`
 }
 
