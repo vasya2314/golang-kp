@@ -37,6 +37,23 @@ type MovieRepository interface {
 		ctx context.Context,
 		id int,
 	) error
+
+	AddMovieActor(
+		ctx context.Context,
+		movieId int,
+		actorId int,
+	) error
+
+	GetMovieActors(
+		ctx context.Context,
+		movieId int,
+	) ([]domain.Actor, error)
+
+	RemoveMovieActor(
+		ctx context.Context,
+		movieID int,
+		actorID int,
+	) error
 }
 
 func NewMovieService(movieRepository MovieRepository) *MovieService {

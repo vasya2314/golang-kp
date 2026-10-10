@@ -1,0 +1,1 @@
+DROP TABLE golang_kp.movie_actors;

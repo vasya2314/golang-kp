@@ -29,3 +29,13 @@ func movieDomainsFromModels(movies []MovieModel) []domain.Movie {
 
 	return movieDomains
 }
+
+type movieActorModel struct {
+	ID          int
+	Version     int
+	FirstName   string
+	LastName    string
+	MiddleName  *string
+	Description *string
+	BirthDate   time.Time
+}

@@ -38,6 +38,23 @@ type MovieService interface {
 		ctx context.Context,
 		id int,
 	) error
+
+	AddMovieActor(
+		ctx context.Context,
+		movieId int,
+		actorId int,
+	) error
+
+	GetMovieActors(
+		ctx context.Context,
+		movieId int,
+	) ([]domain.Actor, error)
+
+	RemoveMovieActor(
+		ctx context.Context,
+		movieID int,
+		actorID int,
+	) error
 }
 
 func NewMovieHTTPHandler(s MovieService) *MovieHTTPHandler {
@@ -53,5 +70,8 @@ func (h *MovieHTTPHandler) Routes(router *chi.Mux) {
 		r.Delete("/{id}", h.DeleteMovie)
 		r.Get("/{id}", h.GetMovie)
 		r.Patch("/{id}", h.PatchMovie)
+		r.Put("/{id}/actors/{actorId}", h.AddMovieActor)
+		r.Get("/{id}/actors", h.GetMovieActors)
+		r.Delete("/{id}/actors/{actorId}", h.RemoveMovieActor)
 	})
 }
