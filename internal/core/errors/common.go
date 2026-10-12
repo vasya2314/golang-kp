@@ -23,4 +23,6 @@ var (
 	ErrInsufficientStorage     = errors.New("недостаточно места в хранилище")
 	ErrLoopDetected            = errors.New("обнаружен цикл")
 	ErrInvalidArgument         = errors.New("некорректный аргумент")
+	ErrPayloadTooLarge         = errors.New("слишком большой размер")
+	ErrUnsupportedMediaType    = errors.New("неподдерживаемый тип файла")
 )

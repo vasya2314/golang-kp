@@ -8,6 +8,13 @@ import (
 
 type MovieService struct {
 	movieRepository MovieRepository
+	fileStorage     FileStorage
+}
+
+type FileStorage interface {
+	Put(ctx context.Context, key string, file domain.File) error
+	Get(ctx context.Context, key string) (domain.File, error)
+	Delete(ctx context.Context, key string) error
 }
 
 type MovieRepository interface {
@@ -56,8 +63,9 @@ type MovieRepository interface {
 	) error
 }
 
-func NewMovieService(movieRepository MovieRepository) *MovieService {
+func NewMovieService(movieRepository MovieRepository, fileStorage FileStorage) *MovieService {
 	return &MovieService{
 		movieRepository: movieRepository,
+		fileStorage:     fileStorage,
 	}
 }

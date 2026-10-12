@@ -12,6 +12,7 @@ type MovieModel struct {
 	Title       string
 	Description *string
 	ReleaseAt   time.Time
+	PosterKey   *string
 }
 
 func movieDomainsFromModels(movies []MovieModel) []domain.Movie {
@@ -24,6 +25,7 @@ func movieDomainsFromModels(movies []MovieModel) []domain.Movie {
 			movie.Title,
 			movie.Description,
 			movie.ReleaseAt,
+			movie.PosterKey,
 		)
 	}
 

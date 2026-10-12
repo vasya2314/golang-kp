@@ -15,6 +15,23 @@ services:
     volumes:
       - ${PROJECT_ROOT}/migrations:/migrations
 
+  golang-kp-s3:
+    image: rustfs/rustfs:1.0.0
+    container_name: golang-kp-s3
+    environment:
+      - RUSTFS_VOLUMES=/data
+      - RUSTFS_ADDRESS=0.0.0.0:9000
+      - RUSTFS_CONSOLE_ENABLE=true
+      - RUSTFS_CONSOLE_ADDRESS=0.0.0.0:9001
+      - RUSTFS_ACCESS_KEY=${S3_ACCESS_KEY}
+      - RUSTFS_SECRET_KEY=${S3_SECRET_KEY}
+    volumes:
+      - ${PROJECT_ROOT}/out/s3data:/data
+    ports:
+      - "127.0.0.1:9000:9000"   # S3 API
+      - "127.0.0.1:9001:9001"   # веб-консоль, удобно смотреть, что лежит в бакете
+    restart: always
+
   port-forwarder:
     image: alpine/socat:1.8.1.3
     container_name: golang-kp-postgres-port-forwarder

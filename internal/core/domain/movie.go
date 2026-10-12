@@ -10,6 +10,7 @@ type Movie struct {
 	Title       string
 	Description *string
 	ReleaseAt   time.Time
+	PosterKey   *string
 }
 
 func NewMovie(
@@ -18,6 +19,7 @@ func NewMovie(
 	title string,
 	description *string,
 	releaseAt time.Time,
+	PosterKey *string,
 ) Movie {
 	return Movie{
 		ID:          id,
@@ -25,6 +27,7 @@ func NewMovie(
 		Title:       title,
 		Description: description,
 		ReleaseAt:   releaseAt,
+		PosterKey:   PosterKey,
 	}
 }
 
@@ -35,6 +38,7 @@ func NewMovieUninitialized(title string, description *string, releaseAt time.Tim
 		title,
 		description,
 		releaseAt,
+		UninitializedPosterKey,
 	)
 }
 

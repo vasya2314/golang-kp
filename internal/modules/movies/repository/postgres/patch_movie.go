@@ -24,17 +24,19 @@ func (r *MovieRepository) PatchMovie(
 		title=$1,
 		description=$2,
 		release_at=$3,
+		poster_key=$4,
 		version=version+1
-	WHERE id=$4 AND version=$5
+	WHERE id=$5 AND version=$6
 	RETURNING
 		id,
 		version,
 		title,
 		description,
-		release_at;
+		release_at,
+		poster_key;
 	`
 
-	row := r.pool.QueryRow(ctx, query, movie.Title, movie.Description, movie.ReleaseAt, id, movie.Version)
+	row := r.pool.QueryRow(ctx, query, movie.Title, movie.Description, movie.ReleaseAt, movie.PosterKey, id, movie.Version)
 
 	var movieModel MovieModel
 	err := row.Scan(
@@ -43,6 +45,7 @@ func (r *MovieRepository) PatchMovie(
 		&movieModel.Title,
 		&movieModel.Description,
 		&movieModel.ReleaseAt,
+		&movieModel.PosterKey,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -62,6 +65,7 @@ func (r *MovieRepository) PatchMovie(
 		movieModel.Title,
 		movieModel.Description,
 		movieModel.ReleaseAt,
+		movieModel.PosterKey,
 	)
 
 	return movieDomain, nil

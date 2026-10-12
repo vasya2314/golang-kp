@@ -14,7 +14,7 @@ func (r *MovieRepository) GetMovie(ctx context.Context, id int) (domain.Movie, e
 	ctx, cancel := context.WithTimeout(ctx, r.pool.OpTimeout())
 	defer cancel()
 
-	query := `SELECT id, version, title, description, release_at FROM movies WHERE id = $1`
+	query := `SELECT id, version, title, description, release_at, poster_key FROM movies WHERE id = $1`
 
 	row := r.pool.QueryRow(ctx, query, id)
 
@@ -26,6 +26,7 @@ func (r *MovieRepository) GetMovie(ctx context.Context, id int) (domain.Movie, e
 		&movieModel.Title,
 		&movieModel.Description,
 		&movieModel.ReleaseAt,
+		&movieModel.PosterKey,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -41,6 +42,7 @@ func (r *MovieRepository) GetMovie(ctx context.Context, id int) (domain.Movie, e
 		movieModel.Title,
 		movieModel.Description,
 		movieModel.ReleaseAt,
+		movieModel.PosterKey,
 	)
 
 	return movieDomain, nil

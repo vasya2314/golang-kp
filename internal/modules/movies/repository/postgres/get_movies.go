@@ -15,7 +15,7 @@ func (r *MovieRepository) GetMovies(
 	ctx, cancel := context.WithTimeout(ctx, r.pool.OpTimeout())
 	defer cancel()
 
-	query := `SELECT id, version, title, description, release_at FROM movies ORDER BY id ASC LIMIT $1 OFFSET $2;`
+	query := `SELECT id, version, title, description, release_at, poster_key FROM movies ORDER BY id ASC LIMIT $1 OFFSET $2;`
 
 	rows, err := r.pool.Query(ctx, query, limit, offset)
 	if err != nil {
@@ -34,6 +34,7 @@ func (r *MovieRepository) GetMovies(
 			&movieModel.Title,
 			&movieModel.Description,
 			&movieModel.ReleaseAt,
+			&movieModel.PosterKey,
 		); err != nil {
 			return nil, fmt.Errorf("сканирование фильмов: %w", err)
 		}

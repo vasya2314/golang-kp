@@ -9,6 +9,7 @@ import (
 
 	core_logger "github.com/vasya2314/golang-kp/internal/core/logger"
 	core_pgx_pool "github.com/vasya2314/golang-kp/internal/core/repository/postgres"
+	core_s3_storage "github.com/vasya2314/golang-kp/internal/core/storage/s3"
 	core_http_middleware "github.com/vasya2314/golang-kp/internal/core/transport/http/middleware"
 	core_http_server "github.com/vasya2314/golang-kp/internal/core/transport/http/server"
 	actor_postgres_repository "github.com/vasya2314/golang-kp/internal/modules/actors/repository/postgres"
@@ -56,10 +57,17 @@ func Run() {
 		core_http_middleware.Panic(),
 	)
 
+	logger.Debug("Initializing s3 storage")
+
+	fileStorage, err := core_s3_storage.NewStorage(ctx, core_s3_storage.NewConfigMust())
+	if err != nil {
+		logger.Fatal("не удалось инициализировать S3-хранилище", zap.Error(err))
+	}
+
 	logger.Debug("Initializing movie module")
 
 	movieRepository := movie_postgres_repository.NewMovieRepository(*pool)
-	movieService := movie_service.NewMovieService(movieRepository)
+	movieService := movie_service.NewMovieService(movieRepository, fileStorage)
 	movieTransportHTTP := movie_transport_http.NewMovieHTTPHandler(movieService)
 
 	logger.Debug("Initializing actor module")

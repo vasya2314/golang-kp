@@ -1,0 +1,1 @@
+ALTER TABLE golang_kp.movies DROP COLUMN poster_key;

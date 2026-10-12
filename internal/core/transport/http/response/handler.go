@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strconv"
 
+	"github.com/vasya2314/golang-kp/internal/core/domain"
 	core_errors "github.com/vasya2314/golang-kp/internal/core/errors"
 	core_logger "github.com/vasya2314/golang-kp/internal/core/logger"
 	core_http_request "github.com/vasya2314/golang-kp/internal/core/transport/http/request"
@@ -29,6 +32,20 @@ func NewHTTPResponseHandler(
 
 func (h *HTTPResponseHandler) NoContentResponse() {
 	h.rw.WriteHeader(http.StatusNoContent)
+}
+
+func (h *HTTPResponseHandler) StreamFileResponse(file domain.File) {
+	h.rw.Header().Set("Content-Type", file.ContentType)
+	h.rw.Header().Set("Content-Length", strconv.FormatInt(file.Size, 10))
+	// Браузер не будет «угадывать» тип и не исполнит, например, подсунутый HTML
+	h.rw.Header().Set("X-Content-Type-Options", "nosniff")
+	h.rw.WriteHeader(http.StatusOK)
+
+	// Байты идут из S3 сразу клиенту, кусками по 32 КБ, без загрузки в память целиком
+	if _, err := io.Copy(h.rw, file.Content); err != nil {
+		// Заголовки уже отправлены, ответить JSON-ошибкой нельзя — только залогировать
+		h.log.Warn("обрыв при отдаче постера", zap.Error(err))
+	}
 }
 
 func (h *HTTPResponseHandler) JSONResponse(
@@ -59,6 +76,14 @@ func (h *HTTPResponseHandler) ErrorResponse(err error, msg string) {
 
 	case errors.Is(err, core_errors.ErrConflict):
 		statusCode = http.StatusConflict
+		logFunc = h.log.Warn
+
+	case errors.Is(err, core_errors.ErrPayloadTooLarge):
+		statusCode = http.StatusRequestEntityTooLarge
+		logFunc = h.log.Warn
+
+	case errors.Is(err, core_errors.ErrUnsupportedMediaType):
+		statusCode = http.StatusUnsupportedMediaType
 		logFunc = h.log.Warn
 
 	default:

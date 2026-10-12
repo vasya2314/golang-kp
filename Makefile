@@ -4,10 +4,10 @@ export
 export PROJECT_ROOT=${shell pwd}
 
 env-up:
-	@docker compose up -d golang-kp-postgres
+	@docker compose up -d golang-kp-postgres golang-kp-s3
 
 env-down:
-	@docker compose down golang-kp-postgres
+	@docker compose down golang-kp-postgres golang-kp-s3
 
 env-cleanup:
 	@read -p "Очистить все volume файлы окружения? Опасность утери данных. [Y/N]: " ans; \
@@ -15,6 +15,7 @@ env-cleanup:
 	  make env-down  && \
 	  make env-port-close && \
 	  rm -rf ${PROJECT_ROOT}/out/pgdata && \
+	  rm -rf ${PROJECT_ROOT}/out/s3data && \
 	  echo "Файлы окружения успешно очищены"; \
 	else \
 	  echo "Очистка окружения отменена"; \

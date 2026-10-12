@@ -1,0 +1,1 @@
+ALTER TABLE golang_kp.movies ADD COLUMN poster_key TEXT;
