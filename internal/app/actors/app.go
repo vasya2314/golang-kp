@@ -1,4 +1,4 @@
-package app
+package app_actors
 
 import (
 	"context"
@@ -9,16 +9,16 @@ import (
 
 	core_logger "github.com/vasya2314/golang-kp/internal/core/logger"
 	core_pgx_pool "github.com/vasya2314/golang-kp/internal/core/repository/postgres"
-	core_s3_storage "github.com/vasya2314/golang-kp/internal/core/storage/s3"
+	core_grpc_server "github.com/vasya2314/golang-kp/internal/core/transport/grpc/server"
 	core_http_middleware "github.com/vasya2314/golang-kp/internal/core/transport/http/middleware"
 	core_http_server "github.com/vasya2314/golang-kp/internal/core/transport/http/server"
 	actor_postgres_repository "github.com/vasya2314/golang-kp/internal/modules/actors/repository/postgres"
 	actor_service "github.com/vasya2314/golang-kp/internal/modules/actors/service"
-	actor_transport_http "github.com/vasya2314/golang-kp/internal/modules/actors/transport"
-	movie_postgres_repository "github.com/vasya2314/golang-kp/internal/modules/movies/repository/postgres"
-	movie_service "github.com/vasya2314/golang-kp/internal/modules/movies/service"
-	movie_transport_http "github.com/vasya2314/golang-kp/internal/modules/movies/transport/http"
+	actor_transport_grpc "github.com/vasya2314/golang-kp/internal/modules/actors/transport/grpc"
+	actor_transport_http "github.com/vasya2314/golang-kp/internal/modules/actors/transport/http"
+	actorsv1 "github.com/vasya2314/golang-kp/pkg/api/actors/v1"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 func Run() {
@@ -57,19 +57,6 @@ func Run() {
 		core_http_middleware.Panic(),
 	)
 
-	logger.Debug("Initializing s3 storage")
-
-	fileStorage, err := core_s3_storage.NewStorage(ctx, core_s3_storage.NewConfigMust())
-	if err != nil {
-		logger.Fatal("не удалось инициализировать S3-хранилище", zap.Error(err))
-	}
-
-	logger.Debug("Initializing movie module")
-
-	movieRepository := movie_postgres_repository.NewMovieRepository(*pool)
-	movieService := movie_service.NewMovieService(movieRepository, fileStorage)
-	movieTransportHTTP := movie_transport_http.NewMovieHTTPHandler(movieService)
-
 	logger.Debug("Initializing actor module")
 
 	actorRepository := actor_postgres_repository.NewActorRepository(*pool)
@@ -80,16 +67,29 @@ func Run() {
 
 	apiVersionRouterV1 := core_http_server.NewAPIVersionRouter(core_http_server.ApiVersion1)
 
-	movieTransportHTTP.Routes(apiVersionRouterV1.Mux)
 	actorTransportHTTP.Routes(apiVersionRouterV1.Mux)
 
 	apiVersionRouterV1.RegisterRoutes(server.Mux)
 
-	logger.Debug("Starting server...")
+	logger.Debug("Initializing gRPC server")
 
-	err = server.Run(ctx)
-	if err != nil {
-		err = fmt.Errorf("не удалось запустить сервер: %w", err)
-		panic(err)
+	grpcServer := core_grpc_server.NewServer(core_grpc_server.MustLoadConfig(), logger)
+
+	// по сути регистрация routes как в HTTP
+	actorsv1.RegisterActorServiceServer(grpcServer, actor_transport_grpc.NewActorGRPCServer(actorService))
+
+	logger.Debug("Starting servers...")
+
+	group, groupCtx := errgroup.WithContext(ctx)
+
+	group.Go(func() error {
+		return server.Run(groupCtx)
+	})
+	group.Go(func() error {
+		return grpcServer.Run(groupCtx)
+	})
+
+	if err = group.Wait(); err != nil {
+		logger.Fatal("сервис остановлен с ошибкой", zap.Error(err))
 	}
 }

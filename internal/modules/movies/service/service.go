@@ -9,6 +9,12 @@ import (
 type MovieService struct {
 	movieRepository MovieRepository
 	fileStorage     FileStorage
+	actorProvider   ActorProvider
+}
+
+type ActorProvider interface {
+	GetActor(ctx context.Context, id int) (domain.Actor, error)
+	GetActorsByIDs(ctx context.Context, ids []int) ([]domain.Actor, error)
 }
 
 type FileStorage interface {
@@ -51,10 +57,10 @@ type MovieRepository interface {
 		actorId int,
 	) error
 
-	GetMovieActors(
+	GetMovieActorIDs(
 		ctx context.Context,
-		movieId int,
-	) ([]domain.Actor, error)
+		movieID int,
+	) ([]int, error)
 
 	RemoveMovieActor(
 		ctx context.Context,
@@ -63,9 +69,10 @@ type MovieRepository interface {
 	) error
 }
 
-func NewMovieService(movieRepository MovieRepository, fileStorage FileStorage) *MovieService {
+func NewMovieService(movieRepository MovieRepository, fileStorage FileStorage, actorProvider ActorProvider) *MovieService {
 	return &MovieService{
 		movieRepository: movieRepository,
 		fileStorage:     fileStorage,
+		actorProvider:   actorProvider,
 	}
 }

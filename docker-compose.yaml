@@ -32,6 +32,33 @@ services:
       - "127.0.0.1:9001:9001"   # веб-консоль, удобно смотреть, что лежит в бакете
     restart: always
 
+  golang-kp-kafka:
+    image: apache/kafka:4.0.0
+    container_name: golang-kp-kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+      # INTERNAL — для контейнеров внутри compose, EXTERNAL — для сервисов, запущенных на хосте
+      KAFKA_LISTENERS: INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://golang-kp-kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@golang-kp-kafka:9093
+      # Один брокер — служебные топики не могут иметь больше одной реплики
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Топики создаём явно, как в проде, а не «как получится» при первой записи
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    volumes:
+      - ${PROJECT_ROOT}/out/kafkadata:/var/lib/kafka/data
+    ports:
+      - "127.0.0.1:9092:9092"
+    restart: always
+
   port-forwarder:
     image: alpine/socat:1.8.1.3
     container_name: golang-kp-postgres-port-forwarder

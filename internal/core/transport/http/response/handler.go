@@ -86,6 +86,10 @@ func (h *HTTPResponseHandler) ErrorResponse(err error, msg string) {
 		statusCode = http.StatusUnsupportedMediaType
 		logFunc = h.log.Warn
 
+	case errors.Is(err, core_errors.ErrServiceUnavailable):
+		statusCode = http.StatusServiceUnavailable
+		logFunc = h.log.Warn
+
 	default:
 		statusCode = http.StatusInternalServerError
 		logFunc = h.log.Error

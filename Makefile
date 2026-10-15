@@ -61,7 +61,36 @@ migrate-action:
 		$(action) $(n)
 
 app-run:
-	@export LOGGER_FOLDER=${PROJECT_ROOT}/out/logs && \
+	@$(MAKE) run-movies & \
+	$(MAKE) run-actors & \
+	wait
+
+run-movies:
+	@export LOGGER_FOLDER=${PROJECT_ROOT}/out/logs/movies && \
 	export POSTGRES_HOST=localhost && \
-	go mod tidy && \
-	go run ${PROJECT_ROOT}/cmd/golang-kp/main.go
+	export HTTP_ADDRESS=:5055 && \
+	go run ${PROJECT_ROOT}/cmd/movies-service
+
+run-actors:
+	@export LOGGER_FOLDER=${PROJECT_ROOT}/out/logs/actors && \
+	export POSTGRES_HOST=localhost && \
+	export HTTP_ADDRESS=:5056 && \
+	go run ${PROJECT_ROOT}/cmd/actors-service
+
+kafka-create-topics:
+	@docker compose exec -T golang-kp-kafka /opt/kafka/bin/kafka-topics.sh \
+		--bootstrap-server localhost:9092 \
+		--create --if-not-exists \
+		--topic actors.events \
+		--partitions 3 \
+		--replication-factor 1
+
+kafka-tail:
+	@docker compose exec golang-kp-kafka /opt/kafka/bin/kafka-console-consumer.sh \
+		--bootstrap-server localhost:9092 \
+		--topic $(topic) \
+		--from-beginning \
+		--property print.key=true
+
+proto-gen:
+	@buf lint && buf generate

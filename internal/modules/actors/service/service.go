@@ -36,6 +36,11 @@ type ActorRepository interface {
 		ctx context.Context,
 		id int,
 	) error
+
+	GetActorsByIDs(
+		ctx context.Context,
+		ids []int,
+	) ([]domain.Actor, error)
 }
 
 func NewActorService(actorRepository ActorRepository) *ActorService {

@@ -41,7 +41,7 @@ func (r *ActorRepository) GetActors(
 
 		actorsModels = append(actorsModels, actorModel)
 	}
-	if err := rows.Err(); err != nil {
+	if err = rows.Err(); err != nil {
 		return nil, fmt.Errorf("следующая строка: %w", err)
 	}
 
