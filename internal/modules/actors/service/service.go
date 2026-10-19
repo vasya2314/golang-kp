@@ -35,6 +35,7 @@ type ActorRepository interface {
 	DeleteActor(
 		ctx context.Context,
 		id int,
+		event domain.OutboxMessage,
 	) error
 
 	GetActorsByIDs(

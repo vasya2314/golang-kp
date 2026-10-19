@@ -1,0 +1,1 @@
+ALTER TABLE golang_kp.movie_actors DROP CONSTRAINT movie_actors_movie_id_fkey;

@@ -7,7 +7,9 @@ import (
 	"os/signal"
 	"syscall"
 
+	core_kafka "github.com/vasya2314/golang-kp/internal/core/kafka"
 	core_logger "github.com/vasya2314/golang-kp/internal/core/logger"
+	core_outbox "github.com/vasya2314/golang-kp/internal/core/outbox"
 	core_pgx_pool "github.com/vasya2314/golang-kp/internal/core/repository/postgres"
 	core_grpc_server "github.com/vasya2314/golang-kp/internal/core/transport/grpc/server"
 	core_http_middleware "github.com/vasya2314/golang-kp/internal/core/transport/http/middleware"
@@ -57,6 +59,16 @@ func Run() {
 		core_http_middleware.Panic(),
 	)
 
+	logger.Debug("Initializing kafka client")
+
+	kafkaClient, err := core_kafka.NewClient(ctx, core_kafka.NewConfigMust())
+	if err != nil {
+		logger.Fatal("не удалось подключиться к kafka", zap.Error(err))
+	}
+	defer kafkaClient.Close()
+
+	relay := core_outbox.NewRelay(pool, kafkaClient, logger)
+
 	logger.Debug("Initializing actor module")
 
 	actorRepository := actor_postgres_repository.NewActorRepository(*pool)
@@ -87,6 +99,9 @@ func Run() {
 	})
 	group.Go(func() error {
 		return grpcServer.Run(groupCtx)
+	})
+	group.Go(func() error {
+		return relay.Run(groupCtx)
 	})
 
 	if err = group.Wait(); err != nil {

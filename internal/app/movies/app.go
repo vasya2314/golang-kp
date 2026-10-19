@@ -7,6 +7,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/twmb/franz-go/pkg/kgo"
+	core_kafka "github.com/vasya2314/golang-kp/internal/core/kafka"
 	core_logger "github.com/vasya2314/golang-kp/internal/core/logger"
 	core_pgx_pool "github.com/vasya2314/golang-kp/internal/core/repository/postgres"
 	core_s3_storage "github.com/vasya2314/golang-kp/internal/core/storage/s3"
@@ -16,7 +18,10 @@ import (
 	movie_postgres_repository "github.com/vasya2314/golang-kp/internal/modules/movies/repository/postgres"
 	movie_service "github.com/vasya2314/golang-kp/internal/modules/movies/service"
 	movie_transport_http "github.com/vasya2314/golang-kp/internal/modules/movies/transport/http"
+	movie_transport_kafka "github.com/vasya2314/golang-kp/internal/modules/movies/transport/kafka"
+	actors_events "github.com/vasya2314/golang-kp/pkg/events/actors"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 func Run() {
@@ -84,11 +89,36 @@ func Run() {
 
 	apiVersionRouterV1.RegisterRoutes(server.Mux)
 
-	logger.Debug("Starting server...")
+	logger.Debug("Initializing kafka consumer")
 
-	err = server.Run(ctx)
+	kafkaClient, err := core_kafka.NewClient(
+		ctx,
+		core_kafka.NewConfigMust(),
+		kgo.ConsumerGroup(movie_transport_kafka.ConsumerGroup), // имя «команды читателей»
+		kgo.ConsumeTopics(actors_events.Topic),                 // что читать
+		// Коммитим offset сами, после обработки. Автокоммит срабатывает по таймеру и может
+		// отметить ещё не обработанное сообщение — при падении оно потеряется
+		kgo.DisableAutoCommit(),
+	)
 	if err != nil {
-		err = fmt.Errorf("не удалось запустить сервер: %w", err)
-		panic(err)
+		logger.Fatal("не удалось подключиться к kafka", zap.Error(err))
+	}
+	defer kafkaClient.Close()
+
+	consumer := movie_transport_kafka.NewActorEventsConsumer(kafkaClient, movieService, logger)
+
+	logger.Debug("Starting server and consumer...")
+
+	group, groupCtx := errgroup.WithContext(ctx)
+
+	group.Go(func() error {
+		return server.Run(groupCtx)
+	})
+	group.Go(func() error {
+		return consumer.Run(groupCtx)
+	})
+
+	if err = group.Wait(); err != nil {
+		logger.Fatal("сервис остановлен с ошибкой", zap.Error(err))
 	}
 }

@@ -746,106 +746,249 @@ type ActorProvider interface {
 **N+1 по сети.** Если бы мы звали `GetActor` в цикле по 30 актёрам фильма, вышло бы 30 сетевых запросов.
 По 2 мс каждый — уже 60 мс вместо 2. Поэтому batch-метод — обязательная часть контракта, а не оптимизация «на потом».
 
-**Самопроверка:** `BatchGetActors` вернул 2 актёра из 3 id. Когда так бывает, и почему это не ошибка? (Ответ в разделе 7.6.)
+**Самопроверка:** `BatchGetActors` вернул 2 актёра из 3 id. Когда так бывает, и почему это не ошибка? (Ответ в разделе 7.19.)
 
-## 7. Шаг 3 — Kafka и outbox
+## 7. Шаг 3 — Kafka и outbox: удаляем связи при удалении актёра
 
-### 7.1. Контракт события
+### 7.1. Что мы делаем и зачем, простыми словами
 
-`pkg/events/actors/events.go`
+**Как сейчас.** Ты удаляешь актёра 10 → Postgres сам удаляет все строки `movie_actors`, где `actor_id = 10`.
+Это делает `ON DELETE CASCADE` у внешнего ключа. Работает только потому, что обе таблицы лежат в одной базе.
 
-```go
-package actorsevents
+**Что сломается.** На шаге 4 таблица `actors` уедет в другую базу. Внешний ключ между базами сделать нельзя,
+значит, и каскада не будет. Актёр удалится, а связи с фильмами останутся висеть.
 
-import (
-	"encoding/json"
-	"fmt"
-	"strconv"
-	"time"
+**Что нужно.** Когда actors-service удаляет актёра, movies-service должен об этом **узнать** и удалить связи у себя.
 
-	"github.com/google/uuid"
-)
+**Почему не gRPC.** Можно было бы сделать, чтобы actors-service после удаления вызывал movies-service по gRPC:
+«удали связи актёра 10». Но тогда:
+- actors-service должен знать про movies-service. Завтра появится search-service, которому тоже важно удаление, —
+  придётся снова менять actors-service;
+- если movies-service в этот момент выключен, вызов не пройдёт и информация потеряется.
 
-const (
-	Topic = "actors.events"
+**Решение — Kafka.** Kafka — это **общий журнал сообщений** между сервисами. Похоже на ленту объявлений:
+- actors-service пишет в ленту объявление: «актёр 10 удалён». Кто его прочитает, ему неважно;
+- movies-service читает ленту и на каждое такое объявление удаляет связи у себя;
+- если movies-service выключен, объявление **никуда не пропадает**: Kafka хранит его на диске,
+  и movies-service прочитает его, когда запустится.
 
-	TypeActorDeleted = "actor.deleted"
-)
+Остаётся одна проблема: как надёжно записать объявление в Kafka. Для этого нужен **outbox** — о нём в 7.3.
 
-// Envelope — общая обёртка для всех событий топика.
-// Потребитель сначала читает Type, потом разбирает Payload в нужную структуру
-type Envelope struct {
-	EventID    string          `json:"event_id"`
-	Type       string          `json:"type"`
-	OccurredAt time.Time       `json:"occurred_at"`
-	Payload    json.RawMessage `json:"payload"`
-}
+### 7.2. Словарь
 
-type ActorDeleted struct {
-	ActorID int `json:"actor_id"`
-}
+Все новые слова этого и следующих разделов. Возвращайся сюда, если в тексте встретил непонятное.
 
-// NewActorDeleted возвращает ключ и значение сообщения Kafka
-func NewActorDeleted(actorID int) (string, []byte, error) {
-	payload, err := json.Marshal(ActorDeleted{ActorID: actorID})
-	if err != nil {
-		return "", nil, fmt.Errorf("сериализация payload: %w", err)
-	}
+**Kafka**
 
-	value, err := json.Marshal(Envelope{
-		EventID:    uuid.NewString(),
-		Type:       TypeActorDeleted,
-		OccurredAt: time.Now().UTC(),
-		Payload:    payload,
-	})
-	if err != nil {
-		return "", nil, fmt.Errorf("сериализация события: %w", err)
-	}
+| Термин | Простыми словами | У нас |
+|---|---|---|
+| **Kafka** | Отдельный сервер, который принимает сообщения, хранит их на диске и отдаёт тем, кто их читает | контейнер `golang-kp-kafka` |
+| **Брокер** | Один сервер Kafka. В проде их несколько, у нас один | `localhost:9092` |
+| **Событие (event)** | Сообщение о том, что **уже произошло**, в прошедшем времени: «актёр удалён», а не «удали связи» | `actor.deleted` |
+| **Сообщение / запись (record)** | То, что лежит в Kafka: **ключ** + **значение** (байты, у нас JSON) | ключ `"10"`, значение — JSON события |
+| **Топик (topic)** | Именованная лента сообщений, как таблица в БД. Пишут и читают по имени | `actors.events` |
+| **Партиция (partition)** | Топик разбит на несколько частей, чтобы его можно было читать параллельно. **Порядок сообщений гарантирован только внутри одной партиции** | у топика 3 партиции |
+| **Ключ сообщения** | По ключу Kafka выбирает партицию: одинаковый ключ → всегда одна и та же партиция → сообщения про одного актёра идут строго по порядку | id актёра |
+| **Producer** | Тот, кто пишет в Kafka | relay в actors-service |
+| **Consumer** | Тот, кто читает из Kafka | consumer в movies-service |
+| **Offset** | Порядковый номер сообщения внутри партиции: 0, 1, 2… Как номер строки | — |
+| **Коммит offset-а** | Consumer сообщает Kafka: «я обработал всё до сообщения N». После перезапуска он продолжит с N+1. Похоже на закладку в книге | `CommitUncommittedOffsets` |
+| **Consumer group** | Имя «команды читателей». Все реплики movies-service — одна группа, и каждое сообщение достанется **одной** из них. Другой сервис с другим именем группы получит **все** сообщения независимо | группа `movies-service` |
 
-	return strconv.Itoa(actorID), value, nil
-}
-```
+**Надёжная доставка**
 
-Решения, которые здесь приняты:
+| Термин | Простыми словами | У нас |
+|---|---|---|
+| **Транзакция** | Несколько SQL-запросов, которые выполняются «всё или ничего». Упал любой — откатываются все | DELETE актёра + INSERT в outbox |
+| **Dual write** | «Двойная запись»: одно действие пишет в **два** разных хранилища (Postgres и Kafka). Общей транзакции у них нет, поэтому одна запись может пройти, а другая нет | проблема из 7.3 |
+| **Outbox** («исходящие») | Обычная таблица в Postgres, куда мы кладём событие **в той же транзакции**, что и основное изменение. Как папка «Исходящие» в почте: письмо сначала попадает туда, а отправляется потом | таблица `outbox` |
+| **Relay** («передатчик») | Фоновая горутина: раз в секунду берёт неотправленные строки из `outbox`, отправляет в Kafka и помечает отправленными | `core_outbox.Relay` |
+| **At-least-once** («хотя бы один раз») | Гарантия доставки: сообщение точно дойдёт, но **может дойти дважды**. Альтернатива «ровно один раз» на практике почти недостижима | и relay, и consumer |
+| **Идемпотентность** | Операцию можно повторить сколько угодно раз, а результат будет как от одного раза. `DELETE ... WHERE actor_id = 10` идемпотентен: второй раз удалит 0 строк. «Увеличь счётчик на 1» — нет | обработчик в consumer |
+| **Eventual consistency** («согласованность в итоге») | Данные двух сервисов какое-то время могут расходиться, но **в итоге** придут в согласие | связи удаляются не мгновенно, а через доли секунды |
+| **Backoff** | Пауза между повторами, которая растёт: 0.1s, 0.2s, 0.4s… Чтобы не долбить упавшую БД | `handleWithRetry` |
+| **Poison pill** («отравленное сообщение») | Сообщение, которое никогда не обработается (например, битый JSON). Если его бесконечно повторять, consumer застрянет и не прочитает ничего после него | пропускаем с логом |
+| **DLQ (dead letter queue)** | Отдельный топик для «отравленных» сообщений: их не теряют, а откладывают, чтобы человек потом разобрался | упражнение 4 |
+| **Inbox** | Таблица `processed_events(event_id)` у получателя: «эти события я уже обработал». Нужна, если обработчик **не** идемпотентный | у нас не нужна |
 
-- **Один топик на сущность (`actors.events`), тип внутри конверта.** Все события про актёра 10 попадают
-  в один топик и идут по порядку: created → updated → deleted. Если сделать по топику на тип,
-  порядок между ними не гарантирован.
-- **Ключ = id актёра.** Kafka кладёт сообщения с одинаковым ключом в одну партицию, а порядок гарантирован
-  **только внутри партиции**. Без ключа «updated» мог бы обработаться после «deleted».
-- **`event_id`** нужен потребителю для идемпотентности (раздел 7.6) и для поиска по логам.
-- **Только id в payload, без данных актёра.** Это **event notification**. Альтернатива — event-carried state transfer
-  (раздел 10).
+**Из раздела 10 (для общего развития)**
 
-### 7.2. Проблема двойной записи
-
-Наивная реализация `DeleteActor`:
-
-```go
-s.actorRepository.DeleteActor(ctx, id)   // 1. БД
-s.producer.Publish(ctx, event)           // 2. Kafka
-```
-
-| Что упало | Последствие |
+| Термин | Простыми словами |
 |---|---|
-| Kafka после успешного DELETE | актёр удалён, событие потеряно, у фильмов навсегда висят связи на несуществующего актёра |
-| Процесс убили между 1 и 2 | то же самое |
-| Сначала Kafka, потом БД, и БД упала | movies удалил связи у **живого** актёра |
+| **CDC (change data capture)** | Программа читает журнал изменений Postgres (WAL) и сама пересылает изменения в Kafka. Пример — **Debezium**. Заменяет наш relay |
+| **Сага (saga)** | Бизнес-операция из нескольких шагов в разных сервисах, где при сбое на шаге 3 запускаются «отменяющие» действия для шагов 1–2 |
+| **Circuit breaker** («предохранитель») | Если сервис-зависимость много раз подряд не ответил, перестаём его вызывать на какое-то время и сразу отвечаем ошибкой |
+| **Schema Registry** | Сервер, который хранит схемы сообщений Kafka и не даёт отправить сообщение, не подходящее под схему |
 
-Общей транзакции у Postgres и Kafka нет. Это проблема **dual write**, и в реальных проектах её решают
-паттерном **Transactional Outbox**:
+### 7.3. Проблема: почему нельзя просто «удалить и отправить»
 
-1. В той же транзакции, что и DELETE, пишем событие в таблицу `outbox` той же БД. Одна транзакция — значит, атомарно.
-2. Отдельный процесс (**relay**) читает неотправленные строки из `outbox`, публикует их в Kafka и помечает отправленными.
+Первое, что приходит в голову:
 
-Если Kafka лежит, события копятся в `outbox` и уйдут, когда она поднимется. Ни одно не потеряется.
-Цена — **at-least-once**: relay может отправить событие, упасть до пометки «отправлено» и отправить его ещё раз.
-Поэтому потребитель обязан быть идемпотентным (7.6).
+```go
+s.actorRepository.DeleteActor(ctx, id)   // 1. удалили в Postgres
+s.producer.Publish(ctx, event)           // 2. отправили в Kafka
+```
 
-### 7.3. Миграция outbox
+Между строкой 1 и строкой 2 может случиться что угодно:
 
-На шаге 3 БД ещё общая, поэтому миграция пока идёт в `migrations/movies` (бывшая `migrations/`).
-На шаге 4 она переедет.
+| Что пошло не так | Что получится |
+|---|---|
+| Kafka недоступна, строка 2 вернула ошибку | актёр удалён, события нет. У фильмов **навсегда** остались связи на несуществующего актёра |
+| Процесс убили (деплой, OOM) между строками 1 и 2 | то же самое |
+| Поменяли порядок: сначала Kafka, потом БД, и БД упала | movies-service удалил связи у **живого** актёра |
+
+Это и есть **dual write**: пишем в два места, а «всё или ничего» для двух разных систем не существует.
+
+### 7.4. Решение: outbox
+
+Идея: **не отправлять в Kafka сразу**. Положить событие в таблицу `outbox` той же базы,
+**в одной транзакции** с удалением. Тогда либо удалилось и записалось событие, либо ничего.
+А отправкой в Kafka займётся отдельная горутина.
+
+```
+actors-service
+┌───────────────────────────────────────────────────────────┐
+│  HTTP DELETE /actors/10                                    │
+│     └─ транзакция:  DELETE FROM actors WHERE id = 10       │
+│                     INSERT INTO outbox (событие)           │  ← либо оба, либо ничего
+│                                                            │
+│  relay (раз в секунду):                                    │
+│     SELECT * FROM outbox WHERE published_at IS NULL        │
+│     → отправить в Kafka → дождаться «принято»              │
+│     → UPDATE outbox SET published_at = now()               │
+└───────────────────────────────┬────────────────────────────┘
+                                ▼
+                    Kafka, топик actors.events
+                                │
+movies-service                  ▼
+┌───────────────────────────────────────────────────────────┐
+│  consumer:                                                 │
+│     прочитать сообщение → DELETE FROM movie_actors         │
+│                           WHERE actor_id = 10              │
+│     → закоммитить offset («обработал»)                     │
+└───────────────────────────────────────────────────────────┘
+```
+
+Что это даёт:
+- **Kafka лежит** → удаление актёра всё равно проходит, события копятся в `outbox` и уйдут, когда Kafka поднимется;
+- **movies-service лежит** → события копятся в Kafka и обработаются после его запуска;
+- **ни одно событие не теряется**.
+
+Цена — **дубли**. Relay может отправить событие в Kafka и упасть, не успев поставить `published_at`.
+После перезапуска он отправит это событие ещё раз. То же с consumer: обработал, упал до коммита offset-а — получит
+сообщение снова. Поэтому обработчик в movies-service обязан быть **идемпотентным**. У нас это так: повторный
+`DELETE ... WHERE actor_id = 10` просто удалит 0 строк.
+
+### 7.5. План
+
+Порядок выбран так, чтобы после каждого шага всё работало и можно было проверить результат.
+
+| # | Что делаем | Где | Как проверить |
+|---|---|---|---|
+| 1 | Поднять Kafka, создать топик, добавить переменную | `Makefile`, `.env` | топик виден в `kafka-topics.sh --describe` |
+| 2 | Контракт события | `pkg/events/actors/events.go` | **уже сделано** |
+| 3 | Миграция: таблица `outbox` | `migrations/` | `\d golang_kp.outbox` в psql |
+| 4 | Тип `OutboxMessage` | `internal/core/domain/outbox.go` | компилируется |
+| 5 | `DeleteActor` в транзакции | репозиторий actors | — |
+| 6 | Сервис формирует событие | сервис actors | удаление актёра → строка в `outbox` |
+| 7 | Конфиг и клиент Kafka | `internal/core/kafka/` | — |
+| 8 | Relay | `internal/core/outbox/relay.go` | — |
+| 9 | Запустить relay в actors-service | `internal/app/actors/app.go` | событие в `make kafka-tail`, `published_at` заполнен |
+| 10 | `RemoveActorLinks` | репозиторий и сервис movies | — |
+| 11 | Consumer | `internal/modules/movies/transport/kafka/` | — |
+| 12 | Запустить consumer в movies-service | `internal/app/movies/app.go` | в логах «связи актера удалены» |
+| 13 | Миграция: убрать FK `movie_actors → actors` | `migrations/` | удаление работает **только** через Kafka |
+| 14 | Прогнать сценарии | — | таблица в 7.20 |
+
+---
+
+### 7.6. Шаг 1 — Kafka, топик, переменная окружения
+
+Kafka уже описана в `docker-compose.yaml` (раздел 4), но `make env-up` её не запускает.
+
+**Шаг 1.1.** В `Makefile` добавь `golang-kp-kafka` в `env-up` и `env-down`:
+
+```make
+env-up:
+	@docker compose up -d golang-kp-postgres golang-kp-s3 golang-kp-kafka
+
+env-down:
+	@docker compose down golang-kp-postgres golang-kp-s3 golang-kp-kafka
+```
+
+**Шаг 1.2.** Запусти и создай топик:
+
+```bash
+make env-up
+make kafka-create-topics
+```
+
+`kafka-create-topics` создаёт топик `actors.events` с 3 партициями. Kafka настроена так, что сама топики
+**не** создаёт (`KAFKA_AUTO_CREATE_TOPICS_ENABLE=false`): в проде топики заводит инфраструктура, а не приложение.
+
+**Шаг 1.3.** Проверь:
+
+```bash
+docker compose exec golang-kp-kafka /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 --describe --topic actors.events
+```
+
+Должны быть три строки `Partition: 0`, `1`, `2`.
+
+**Шаг 1.4.** В `.env` добавь адрес брокера (через запятую можно перечислить несколько):
+
+```
+KAFKA_BROKERS=localhost:9092
+```
+
+**Шаг 1.5.** Зависимость `franz-go` уже есть в `go.mod`, но с пометкой `// indirect`. После того как появится код,
+который её использует (шаг 7), выполни `go mod tidy`.
+
+### 7.7. Шаг 2 — контракт события (уже сделано)
+
+Файл `pkg/events/actors/events.go` у тебя уже есть. Разберём, что в нём и зачем.
+
+**Почему `pkg/`, а не `internal/`.** Это контракт между сервисами, как `.proto` для gRPC.
+Его импортируют оба: actors-service, чтобы создать событие, и movies-service, чтобы прочитать.
+
+**Конверт (`Envelope`).** Каждое сообщение в топике — это JSON такого вида:
+
+```json
+{
+  "event_id": "5f0c…",
+  "type": "actor.deleted",
+  "occurred_at": "2026-10-15T12:00:00Z",
+  "payload": { "actor_id": 10 }
+}
+```
+
+- `type` говорит, **что** случилось. Consumer сначала смотрит на `type` и только потом разбирает `payload`
+  в нужную структуру. Так в одном топике могут жить разные события: сегодня `actor.deleted`, завтра `actor.updated`.
+- `event_id` — уникальный id события (UUID). Нужен, чтобы найти событие в логах обоих сервисов
+  и чтобы при необходимости отсеять дубли (inbox).
+- `occurred_at` — когда это случилось.
+- `payload` — данные события. Тип `json.RawMessage` значит «сырые байты JSON, разберём потом».
+
+**`NewActorDeleted(actorID)`** возвращает:
+- **ключ** `"10"` — id актёра строкой. Все события про актёра 10 попадут в одну партицию и будут обработаны по порядку;
+- **значение** — конверт в JSON.
+
+**Почему в payload только id.** Получателю этого достаточно. Такой стиль называется «уведомление о событии».
+Альтернатива — класть в событие все данные актёра (раздел 10, «Данные между сервисами»).
+
+### 7.8. Шаг 3 — миграция: таблица outbox
+
+На этом шаге база ещё общая, поэтому миграция ложится в обычную папку `migrations/`.
+
+**Шаг 3.1.** Создай файлы миграции:
+
+```bash
+make migrate-create seq=add_outbox
+```
+
+Появятся `migrations/000006_add_outbox.up.sql` и `migrations/000006_add_outbox.down.sql`.
+
+**Шаг 3.2.** `000006_add_outbox.up.sql`:
 
 ```sql
 CREATE TABLE golang_kp.outbox (
@@ -857,20 +1000,40 @@ CREATE TABLE golang_kp.outbox (
     published_at TIMESTAMPTZ
 );
 
--- Частичный индекс: только неотправленные. Он маленький, даже когда в таблице миллионы старых строк
 CREATE INDEX outbox_unpublished_idx ON golang_kp.outbox (id) WHERE published_at IS NULL;
 ```
 
-В этой же миграции (или в соседней) удали FK и каскад с `actor_id`:
+| Колонка | Зачем |
+|---|---|
+| `id` | порядковый номер. Relay отправляет события в порядке `id`, то есть в порядке создания |
+| `topic` | в какой топик Kafka отправить. Одна таблица `outbox` на весь сервис, а топики могут быть разными |
+| `key` | ключ сообщения Kafka (id актёра) |
+| `payload` | значение сообщения: JSON-конверт из шага 2 |
+| `created_at` | когда событие создано. Удобно при отладке: «почему событие висит неотправленным уже час?» |
+| `published_at` | `NULL` — ещё не отправлено, дата — когда отправлено. По этой колонке relay понимает, что брать |
+
+**Индекс `WHERE published_at IS NULL`** — частичный: в него попадают только неотправленные строки.
+Relay каждую секунду ищет именно их. Даже когда в таблице миллион старых отправленных строк, индекс остаётся крошечным.
+
+**Шаг 3.3.** `000006_add_outbox.down.sql`:
 
 ```sql
-ALTER TABLE golang_kp.movie_actors DROP CONSTRAINT movie_actors_actor_id_fkey;
+DROP TABLE golang_kp.outbox;
 ```
 
-Точное имя ограничения посмотри через `\d golang_kp.movie_actors` в psql. FK на `movies` **оставляем**:
-обе таблицы в одной БД и в одном сервисе.
+**Шаг 3.4.** Накати и проверь:
 
-### 7.4. actors-service: DeleteActor в транзакции
+```bash
+make migrate-up
+docker compose exec golang-kp-postgres psql -U golang_kp -d golang_kp -c '\d golang_kp.outbox'
+```
+
+Внешний ключ `movie_actors → actors` пока **не трогаем**. Пока он есть, каскад продолжает работать,
+и система не ломается, даже если Kafka-часть ещё не дописана. Уберём его последним, на шаге 13.
+
+### 7.9. Шаг 4 — тип OutboxMessage
+
+Сервису нужно передать событие в репозиторий. Заведём для этого маленькую структуру.
 
 `internal/core/domain/outbox.go`
 
@@ -888,39 +1051,40 @@ func NewOutboxMessage(topic, key string, payload []byte) OutboxMessage {
 }
 ```
 
-Сервис формирует событие:
+Это ровно три поля, которые потом лягут в колонки `topic`, `key`, `payload` таблицы `outbox`.
+
+### 7.10. Шаг 5 — репозиторий: DeleteActor в транзакции
+
+До сих пор в проекте каждый метод репозитория выполнял **один** SQL-запрос через `r.pool.Exec`.
+Теперь нужно **два** запроса, и они должны пройти вместе или не пройти вообще. Для этого — транзакция.
+
+**Шаг 5.1.** Перепиши `internal/modules/actors/repository/postgres/delete_actor.go`:
 
 ```go
-func (s *ActorService) DeleteActor(ctx context.Context, id int) error {
-	key, payload, err := actorsevents.NewActorDeleted(id)
-	if err != nil {
-		return fmt.Errorf("формирование события: %w", err)
-	}
+package actor_postgres_repository
 
-	event := domain.NewOutboxMessage(actorsevents.Topic, key, payload)
+import (
+	"context"
+	"fmt"
 
-	if err = s.actorRepository.DeleteActor(ctx, id, event); err != nil {
-		return fmt.Errorf("удаление актера/актрисы: %w", err)
-	}
+	"github.com/vasya2314/golang-kp/internal/core/domain"
+	core_errors "github.com/vasya2314/golang-kp/internal/core/errors"
+)
 
-	return nil
-}
-```
-
-Репозиторий выполняет оба запроса в **одной транзакции**. Транзакции в проекте встречаются впервые:
-
-```go
 func (r *ActorRepository) DeleteActor(ctx context.Context, id int, event domain.OutboxMessage) error {
 	ctx, cancel := context.WithTimeout(ctx, r.pool.OpTimeout())
 	defer cancel()
 
+	// 1. Открываем транзакцию. Все запросы ниже идут через tx, а не через r.pool
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("начало транзакции: %w", err)
 	}
-	// После успешного Commit ничего не делает, при любом раннем return откатывает транзакцию
+	// 2. Страховка: если выйдем из функции до Commit (любой return err), транзакция откатится.
+	//    После успешного Commit этот Rollback ничего не делает
 	defer tx.Rollback(ctx)
 
+	// 3. Удаляем актёра
 	cmdTag, err := tx.Exec(ctx, `DELETE FROM actors WHERE id = $1;`, id)
 	if err != nil {
 		return fmt.Errorf("удаление актера/актрисы: %w", err)
@@ -929,6 +1093,7 @@ func (r *ActorRepository) DeleteActor(ctx context.Context, id int, event domain.
 		return fmt.Errorf("актер/актриса с id='%d': %w", id, core_errors.ErrNotFound)
 	}
 
+	// 4. Кладём событие в outbox — в той же транзакции
 	_, err = tx.Exec(
 		ctx,
 		`INSERT INTO outbox (topic, key, payload) VALUES ($1, $2, $3);`,
@@ -940,6 +1105,7 @@ func (r *ActorRepository) DeleteActor(ctx context.Context, id int, event domain.
 		return fmt.Errorf("запись события в outbox: %w", err)
 	}
 
+	// 5. Фиксируем. Только здесь изменения становятся видны остальным
 	if err = tx.Commit(ctx); err != nil {
 		return fmt.Errorf("фиксация транзакции: %w", err)
 	}
@@ -948,19 +1114,128 @@ func (r *ActorRepository) DeleteActor(ctx context.Context, id int, event domain.
 }
 ```
 
-**`defer tx.Rollback(ctx)` — идиома, которую надо запомнить.** Без неё любой `return err` посередине оставит
-транзакцию открытой и соединение «зависшим» в пуле.
+Как это работает:
+- до `Commit` никто, кроме нас, не видит ни удаления, ни новой строки в `outbox`;
+- актёра не нашли → `return` → `defer tx.Rollback` откатывает → в `outbox` ничего не попало. Это правильно:
+  события о том, чего не было, быть не должно;
+- INSERT упал → откат → актёр **не** удалён, пользователь получит 500 и может повторить.
 
-### 7.5. Core: Kafka-клиент и outbox relay
+**`defer tx.Rollback(ctx)` сразу после `Begin` — идиома, которую надо запомнить.** Без неё любой ранний `return`
+оставит транзакцию открытой, а соединение — занятым в пуле. Через несколько таких ошибок пул кончится и сервис встанет.
 
-`internal/core/kafka/config.go`: префикс `KAFKA`, поле `Brokers []string` (`envconfig:"BROKERS" required:"true"`).
-envconfig сам разбивает `localhost:9092,localhost:9093` по запятым.
+**Шаг 5.2.** В `internal/modules/actors/service/service.go` поправь интерфейс `ActorRepository`:
 
-`internal/core/kafka/client.go`
+```go
+	DeleteActor(
+		ctx context.Context,
+		id int,
+		event domain.OutboxMessage,
+	) error
+```
+
+### 7.11. Шаг 6 — сервис формирует событие
+
+Перепиши `internal/modules/actors/service/delete_actor.go`:
+
+```go
+package actor_service
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/vasya2314/golang-kp/internal/core/domain"
+	actors_events "github.com/vasya2314/golang-kp/pkg/events/actors"
+)
+
+func (s *ActorService) DeleteActor(ctx context.Context, id int) error {
+	key, payload, err := actors_events.NewActorDeleted(id)
+	if err != nil {
+		return fmt.Errorf("формирование события: %w", err)
+	}
+
+	event := domain.NewOutboxMessage(actors_events.Topic, key, payload)
+
+	if err = s.actorRepository.DeleteActor(ctx, id, event); err != nil {
+		return fmt.Errorf("удаление актера/актрисы: %w", err)
+	}
+
+	return nil
+}
+```
+
+Почему событие собирает сервис, а не репозиторий: «при удалении актёра надо сообщить миру» — это бизнес-правило.
+Репозиторий только сохраняет то, что ему дали.
+
+HTTP-хендлер `DeleteActor` менять не нужно: сигнатура сервиса осталась прежней.
+
+**Проверка.** Запусти actors-service (`make run-actors`), создай тестового актёра и удали его:
+
+```bash
+curl -X DELETE localhost:5056/api/v1/actors/<id>
+
+docker compose exec golang-kp-postgres psql -U golang_kp -d golang_kp \
+  -c 'SELECT id, topic, key, payload, published_at FROM golang_kp.outbox;'
+```
+
+Должна появиться строка с `published_at` = пусто. Отправлять её пока некому — это следующий шаг.
+
+### 7.12. Шаг 7 — конфиг и клиент Kafka
+
+Делаем по аналогии с Postgres: конфиг из env и функция, которая создаёт клиент и проверяет соединение.
+
+**Шаг 7.1.** `internal/core/kafka/config.go`:
 
 ```go
 package core_kafka
 
+import (
+	"fmt"
+
+	"github.com/kelseyhightower/envconfig"
+)
+
+type Config struct {
+	// envconfig сам разбивает "host1:9092,host2:9092" по запятым
+	Brokers []string `envconfig:"BROKERS" required:"true"`
+}
+
+func NewConfig() (Config, error) {
+	var config Config
+
+	err := envconfig.Process("KAFKA", &config)
+	if err != nil {
+		return Config{}, fmt.Errorf("обработка переменных окружения: %w", err)
+	}
+
+	return config, nil
+}
+
+func NewConfigMust() Config {
+	config, err := NewConfig()
+	if err != nil {
+		err = fmt.Errorf("получение конфигурации kafka: %w", err)
+		panic(err)
+	}
+
+	return config
+}
+```
+
+**Шаг 7.2.** `internal/core/kafka/client.go`:
+
+```go
+package core_kafka
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/twmb/franz-go/pkg/kgo"
+)
+
+// opts — дополнительные настройки. Producer-у (actors) они не нужны,
+// а consumer-у (movies) нужно сказать, какую группу и какие топики читать
 func NewClient(ctx context.Context, config Config, opts ...kgo.Opt) (*kgo.Client, error) {
 	opts = append(opts, kgo.SeedBrokers(config.Brokers...))
 
@@ -969,7 +1244,7 @@ func NewClient(ctx context.Context, config Config, opts ...kgo.Opt) (*kgo.Client
 		return nil, fmt.Errorf("создание kafka-клиента: %w", err)
 	}
 
-	// Как pool.Ping для Postgres: падаем на старте, а не на первом сообщении
+	// Как pool.Ping для Postgres: если Kafka недоступна, падаем на старте, а не на первом сообщении
 	if err = client.Ping(ctx); err != nil {
 		client.Close()
 
@@ -980,8 +1255,14 @@ func NewClient(ctx context.Context, config Config, opts ...kgo.Opt) (*kgo.Client
 }
 ```
 
-Producer-настройки по умолчанию у franz-go уже «продовые»: `acks=all` (запись подтверждена всеми репликами)
-и идемпотентный producer (брокер отбрасывает дубли при сетевых ретраях). Явно ничего задавать не нужно.
+`kgo` — пакет библиотеки franz-go. Один `*kgo.Client` умеет и писать, и читать. Настройки записи по умолчанию
+уже надёжные: Kafka подтверждает запись, только когда сохранила её, а сетевые повторы не создают дублей на стороне брокера.
+
+Теперь выполни `go mod tidy`.
+
+### 7.13. Шаг 8 — relay
+
+Relay — это бесконечный цикл: раз в секунду взять неотправленные строки, отправить, пометить.
 
 `internal/core/outbox/relay.go`
 
@@ -1041,8 +1322,6 @@ func (r *Relay) publishBatch(ctx context.Context) error {
 	}
 	defer tx.Rollback(ctx)
 
-	// FOR UPDATE SKIP LOCKED: если запущено несколько реплик сервиса,
-	// каждая берёт свои строки и не ждёт чужие блокировки
 	rows, err := tx.Query(ctx, `
 	SELECT id, topic, key, payload
 	FROM outbox
@@ -1084,10 +1363,9 @@ func (r *Relay) publishBatch(ctx context.Context) error {
 		return nil
 	}
 
-	// Ждём подтверждения от Kafka по каждой записи
 	if err = r.kafka.ProduceSync(ctx, records...).FirstErr(); err != nil {
-		// Транзакция откатится, строки останутся неотправленными, и следующий тик повторит их.
-		// Часть записей могла уже уйти — отсюда at-least-once
+		// Транзакция откатится, строки останутся неотправленными, следующий тик повторит их.
+		// Часть записей могла уже уйти — отсюда дубли (at-least-once)
 		return fmt.Errorf("публикация в kafka: %w", err)
 	}
 
@@ -1100,28 +1378,132 @@ func (r *Relay) publishBatch(ctx context.Context) error {
 }
 ```
 
-**Сборка в `app_actors`.** Создай Kafka-клиент через `core_kafka.NewClient(ctx, cfg)`, `defer client.Close()`,
-и добавь третью горутину в errgroup: `group.Go(func() error { return relay.Run(groupCtx) })`.
+Что происходит в `publishBatch` по шагам:
 
-**Самопроверка:**
-1. Почему relay держит транзакцию открытой, пока ждёт Kafka? Что было бы, если сначала сделать `UPDATE ... published_at`,
-   закоммитить и только потом отправлять?
-2. Таблица `outbox` растёт бесконечно. Как бы ты её чистил? (Подсказка: фоновое удаление строк с `published_at` старше N дней.)
+1. **Открываем транзакцию.** Она нужна, чтобы заблокировать выбранные строки, пока мы их отправляем.
+2. **Берём до 100 неотправленных строк по порядку.** Про `FOR UPDATE SKIP LOCKED`:
+   - `FOR UPDATE` — «эти строки мои, пока транзакция не закончится, другие их не трогают»;
+   - `SKIP LOCKED` — «строки, которые уже кто-то взял, пропусти, не жди».
+   Если запустить три реплики actors-service, каждая возьмёт **свои** строки, и одно событие не уйдёт трижды.
+3. **Превращаем строки в `kgo.Record`** — сообщения Kafka (топик, ключ, значение).
+4. **`ProduceSync`** отправляет все записи и **ждёт**, пока Kafka подтвердит каждую. `FirstErr()` — первая ошибка, если была.
+5. **Ставим `published_at`** у отправленных строк.
+6. **`Commit`**. Строки помечены, блокировка снята.
 
-### 7.6. movies-service: consumer
+Если на шаге 4 или 5 что-то упало, `defer tx.Rollback` откатывает транзакцию. Строки остаются с `published_at IS NULL`,
+и через секунду relay попробует снова.
 
-**Семантика доставки.** Мы коммитим offset (отметку «прочитал до сюда») **после** обработки сообщения.
-Если процесс упадёт между обработкой и коммитом, после рестарта сообщение придёт снова.
-Это **at-least-once**, как и у relay. Значит, обработчик должен выдерживать повтор.
+### 7.14. Шаг 9 — запустить relay в actors-service
 
-Удобно, что `DELETE FROM movie_actors WHERE actor_id = $1` идемпотентен сам по себе: повторный запуск удалит 0 строк.
-Для неидемпотентных обработчиков (например, «увеличить счётчик») нужен **inbox**: таблица `processed_events(event_id PK)`,
-в которую в одной транзакции с изменением пишется `event_id`. При повторе вставка падает на конфликте, и событие пропускается.
+В `internal/app/actors/app.go`:
 
-**Сервис и репозиторий.** `RemoveActorLinks(ctx, actorID int) error` → `DELETE FROM movie_actors WHERE actor_id = $1;`.
-Индекс по `actor_id` у тебя уже есть: вот и пригодился.
+**Шаг 9.1.** После создания `pool` создай Kafka-клиент:
 
-`internal/modules/movies/transport/kafka/consumer.go`. Kafka — ещё один **transport** (входящий адаптер), как HTTP:
+```go
+	logger.Debug("Initializing kafka client")
+
+	kafkaClient, err := core_kafka.NewClient(ctx, core_kafka.NewConfigMust())
+	if err != nil {
+		logger.Fatal("не удалось подключиться к kafka", zap.Error(err))
+	}
+	defer kafkaClient.Close()
+```
+
+**Шаг 9.2.** Перед запуском серверов создай relay:
+
+```go
+	relay := core_outbox.NewRelay(pool, kafkaClient, logger)
+```
+
+**Шаг 9.3.** Добавь третью горутину в `errgroup`, рядом с HTTP и gRPC:
+
+```go
+	group.Go(func() error {
+		return relay.Run(groupCtx)
+	})
+```
+
+Теперь actors-service — это три параллельные задачи: HTTP-сервер, gRPC-сервер и relay. При Ctrl+C все три останавливаются.
+
+**Проверка.**
+
+```bash
+make run-actors                          # терминал 1
+make kafka-tail topic=actors.events      # терминал 2: печатает всё, что приходит в топик
+```
+
+Сразу после старта relay отправит строку, оставшуюся с шага 6, и в терминале 2 появится сообщение
+`10	{"event_id":...,"type":"actor.deleted",...}` (первым идёт ключ). Удали ещё одного актёра — через секунду
+появится новое сообщение. В таблице `outbox` у обеих строк будет заполнен `published_at`.
+
+**Половина пути пройдена:** actors-service надёжно публикует события. Теперь их нужно читать.
+
+### 7.15. Шаг 10 — movies-service: удаление связей актёра
+
+**Шаг 10.1.** Репозиторий: `internal/modules/movies/repository/postgres/remove_actor_links.go`
+
+```go
+package movie_postgres_repository
+
+import (
+	"context"
+	"fmt"
+)
+
+func (r *MovieRepository) RemoveActorLinks(ctx context.Context, actorID int) error {
+	ctx, cancel := context.WithTimeout(ctx, r.pool.OpTimeout())
+	defer cancel()
+
+	query := `DELETE FROM movie_actors WHERE actor_id = $1;`
+
+	if _, err := r.pool.Exec(ctx, query, actorID); err != nil {
+		return fmt.Errorf("выполнение запроса: %w", err)
+	}
+
+	return nil
+}
+```
+
+Обрати внимание: здесь **нет** проверки `RowsAffected() == 0 → ErrNotFound`, в отличие от `RemoveMovieActor`.
+Удалено 0 строк — это нормально: у актёра могло не быть фильмов, или это повторная доставка того же события.
+Ошибка здесь сломала бы идемпотентность.
+
+Индекс `movie_actors_actor_id_dnx` по `actor_id`, который ты создал в миграции 000004, делает этот запрос быстрым.
+
+**Шаг 10.2.** Добавь метод в интерфейс `MovieRepository` в `internal/modules/movies/service/service.go`:
+
+```go
+	RemoveActorLinks(
+		ctx context.Context,
+		actorID int,
+	) error
+```
+
+**Шаг 10.3.** Сервис: `internal/modules/movies/service/remove_actor_links.go`
+
+```go
+package movie_service
+
+import (
+	"context"
+	"fmt"
+)
+
+func (s *MovieService) RemoveActorLinks(ctx context.Context, actorID int) error {
+	if err := s.movieRepository.RemoveActorLinks(ctx, actorID); err != nil {
+		return fmt.Errorf("удаление связей актера/актрисы %d с фильмами: %w", actorID, err)
+	}
+
+	return nil
+}
+```
+
+### 7.16. Шаг 11 — consumer
+
+Consumer — это **ещё один транспорт** movies-service, как HTTP. HTTP-хендлер получает запрос и вызывает сервис.
+Consumer получает сообщение из Kafka и вызывает сервис. Поэтому он лежит в `transport/kafka`.
+
+`internal/modules/movies/transport/kafka/consumer.go`
 
 ```go
 package movie_transport_kafka
@@ -1134,7 +1516,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kgo"
 	core_logger "github.com/vasya2314/golang-kp/internal/core/logger"
-	actorsevents "github.com/vasya2314/golang-kp/pkg/events/actors"
+	actors_events "github.com/vasya2314/golang-kp/pkg/events/actors"
 	"go.uber.org/zap"
 )
 
@@ -1163,6 +1545,7 @@ func NewActorEventsConsumer(
 
 func (c *ActorEventsConsumer) Run(ctx context.Context) error {
 	for {
+		// Ждёт новые сообщения. Возвращает пачку (может быть из нескольких партиций)
 		fetches := c.client.PollFetches(ctx)
 		if fetches.IsClientClosed() || ctx.Err() != nil {
 			return nil
@@ -1186,6 +1569,7 @@ func (c *ActorEventsConsumer) Run(ctx context.Context) error {
 			return nil
 		}
 
+		// «Закладка»: всё, что прочитали в этой пачке, обработано
 		if err := c.client.CommitUncommittedOffsets(ctx); err != nil {
 			c.logger.Error("коммит offset-ов", zap.Error(err))
 		}
@@ -1220,10 +1604,9 @@ func (c *ActorEventsConsumer) handleWithRetry(ctx context.Context, record *kgo.R
 }
 
 func (c *ActorEventsConsumer) handle(ctx context.Context, record *kgo.Record) error {
-	var envelope actorsevents.Envelope
+	var envelope actors_events.Envelope
 	if err := json.Unmarshal(record.Value, &envelope); err != nil {
-		// Битое сообщение не починится повтором: ретраить бесполезно, иначе застрянем навсегда.
-		// В проде такое кладут в DLQ (раздел 10)
+		// Битое сообщение не починится повтором. Если ретраить — застрянем на нём навсегда
 		c.logger.Error("невалидное сообщение, пропускаем", zap.Int64("offset", record.Offset), zap.Error(err))
 
 		return nil
@@ -1236,8 +1619,8 @@ func (c *ActorEventsConsumer) handle(ctx context.Context, record *kgo.Record) er
 	ctx = core_logger.ToContext(ctx, log)
 
 	switch envelope.Type {
-	case actorsevents.TypeActorDeleted:
-		var payload actorsevents.ActorDeleted
+	case actors_events.TypeActorDeleted:
+		var payload actors_events.ActorDeleted
 		if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 			log.Error("невалидный payload, пропускаем", zap.Error(err))
 
@@ -1251,156 +1634,446 @@ func (c *ActorEventsConsumer) handle(ctx context.Context, record *kgo.Record) er
 		log.Debug("связи актера удалены", zap.Int("actor_id", payload.ActorID))
 
 	default:
-		// Неизвестный тип — не ошибка: actors-service мог добавить новое событие,
-		// а мы его пока не обрабатываем. Это и есть forward compatibility
+		// Незнакомый тип — не ошибка: actors-service мог добавить новое событие,
+		// которое нам пока не интересно. Просто пропускаем
 	}
 
 	return nil
 }
 ```
 
-Две категории ошибок, которые важно различать:
+Как это читать:
 
-| Ошибка | Пример | Что делать |
-|---|---|---|
-| **Временная** | БД недоступна, таймаут | повторять с backoff, offset не двигать |
-| **Постоянная** | битый JSON | повтор не поможет: залогировать и пропустить (или в DLQ) |
+- **`Run`** — бесконечный цикл: получить пачку сообщений → обработать каждое → закоммитить offset-ы → снова.
+- **`handleWithRetry`** повторяет `handle`, пока тот не вернёт `nil`. Пауза между попытками растёт: 0.1s, 0.2s, 0.4s… до 10s.
+  Если Postgres упал на минуту, consumer подождёт и продолжит, событие не потеряется.
+- **`handle`** разбирает конверт, смотрит `type` и вызывает нужный метод сервиса.
+- **Коммит offset-а идёт после обработки.** Если процесс упадёт посередине, после рестарта Kafka отдаст
+  те же сообщения ещё раз (at-least-once). Обработчик идемпотентный, поэтому это безопасно.
 
-Если перепутать и ретраить постоянную ошибку, consumer застрянет на одном сообщении навсегда (**poison pill**),
-а за ним встанет вся партиция.
+Самое важное здесь — разделять два вида ошибок:
 
-**Сборка в `app_movies`:**
+| Ошибка | Пример | Что делаем | Почему |
+|---|---|---|---|
+| **Временная** | Postgres недоступен, таймаут | возвращаем ошибку → повтор с паузой | через минуту БД поднимется, и всё получится |
+| **Постоянная** | битый JSON | логируем и возвращаем `nil` → идём дальше | повтор никогда не поможет. Если повторять, consumer застрянет (poison pill), а за этим сообщением встанет вся партиция |
+
+**`ctx = core_logger.ToContext(ctx, log)`** — то же, что делают HTTP-middleware и gRPC-interceptor: кладём логгер
+в контекст, иначе `core_logger.FromContext` в сервисном слое упадёт.
+
+### 7.17. Шаг 12 — запустить consumer в movies-service
+
+Сейчас `app_movies.Run` запускает только HTTP-сервер через `server.Run(ctx)`. Теперь задач две,
+поэтому переходим на `errgroup`, как в actors-service.
+
+В `internal/app/movies/app.go`:
+
+**Шаг 12.1.** После создания `movieService` создай Kafka-клиент с настройками consumer-а и сам consumer:
 
 ```go
-kafkaClient, err := core_kafka.NewClient(ctx, core_kafka.NewConfigMust(),
-	kgo.ConsumerGroup(movie_transport_kafka.ConsumerGroup),
-	kgo.ConsumeTopics(actorsevents.Topic),
-	// Коммитим сами, после обработки. Автокоммит коммитит по таймеру — и может отметить
-	// то, что ещё не обработано, а при падении такое событие потеряется
-	kgo.DisableAutoCommit(),
-)
-// ...
-defer kafkaClient.Close()
+	logger.Debug("Initializing kafka consumer")
 
-group.Go(func() error { return httpServer.Run(groupCtx) })
-group.Go(func() error { return consumer.Run(groupCtx) })
+	kafkaClient, err := core_kafka.NewClient(
+		ctx,
+		core_kafka.NewConfigMust(),
+		kgo.ConsumerGroup(movie_transport_kafka.ConsumerGroup), // имя «команды читателей»
+		kgo.ConsumeTopics(actors_events.Topic),                 // что читать
+		// Коммитим offset сами, после обработки. Автокоммит срабатывает по таймеру и может
+		// отметить ещё не обработанное сообщение — при падении оно потеряется
+		kgo.DisableAutoCommit(),
+	)
+	if err != nil {
+		logger.Fatal("не удалось подключиться к kafka", zap.Error(err))
+	}
+	defer kafkaClient.Close()
+
+	consumer := movie_transport_kafka.NewActorEventsConsumer(kafkaClient, movieService, logger)
 ```
 
-**Consumer group.** Все реплики movies-service с одним `ConsumerGroup` делят партиции между собой:
-каждое сообщение обработает **одна** реплика. Если завтра появится search-service, он заведёт свою группу
-и получит **все** те же события независимо от movies. Это главное отличие Kafka от очереди задач.
+**Шаг 12.2.** Замени запуск сервера в конце функции:
 
-### 7.7. Вернёмся к вопросу из 6.7
+```go
+	logger.Debug("Starting server and consumer...")
 
-Почему `BatchGetActors` может вернуть меньше актёров, чем было id?
+	group, groupCtx := errgroup.WithContext(ctx)
 
-```
-t1  movies: AddMovieActor → gRPC GetActor(10) → OK
-t2  actors: DELETE actor 10 + outbox
-t3  movies: INSERT movie_actors (1, 10)          ← актёр уже удалён!
-t4  movies consumer: actor.deleted(10) → DELETE связи   ← подчистили
-```
+	group.Go(func() error {
+		return server.Run(groupCtx)
+	})
+	group.Go(func() error {
+		return consumer.Run(groupCtx)
+	})
 
-Между t2 и t4 (обычно доли секунды, но при лежащей Kafka — часы) в `movie_actors` есть id несуществующего актёра.
-Это **eventual consistency**: система приходит к согласованному состоянию не мгновенно, а **в итоге**.
-
-Обрати внимание: гонка t1→t3 закрывается тем же событием, потому что DELETE в консьюмере сработает после INSERT.
-Поэтому `GetMovieActors` спокойно возвращает только найденных актёров. Расхождение — нормальное временное состояние,
-а не ошибка.
-
-**В этом и состоит цена разделения:** раньше FK гарантировал целостность всегда, теперь только «в итоге».
-
-## 8. Шаг 4 — раздельные БД
-
-К этому моменту movies-service не читает и не пишет `actors` и `outbox`. Осталось физически перенести данные.
-
-### 8.1. Миграции
-
-```
-migrations/movies/   ← всё, что было (000001…000006+)
-migrations/actors/
-  000001_init.up.sql     ← CREATE SCHEMA golang_kp; CREATE TABLE actors (как в 000003)
-  000002_outbox.up.sql   ← outbox из 7.3
+	if err = group.Wait(); err != nil {
+		logger.Fatal("сервис остановлен с ошибкой", zap.Error(err))
+	}
 ```
 
-И новая миграция в `movies`: `DROP TABLE golang_kp.outbox; DROP TABLE golang_kp.actors;`.
-**Накатывай её последней**, после переноса данных.
+**Откуда consumer начнёт читать.** Группа `movies-service` новая, закладки у неё ещё нет. В этом случае franz-go
+по умолчанию читает топик **с самого начала**, поэтому события, отправленные на шаге 9, тоже будут обработаны.
+При следующих запусках чтение продолжится с закладки.
 
-`Makefile`: параметризуем миграции именем сервиса. Здесь удобен приём с переменной в имени переменной:
+**Проверка.** Запусти оба сервиса (`make app-run`). В логе movies-service должны появиться строки
+«связи актера удалены» для событий, которые уже лежат в топике.
+
+Теперь попробуй полный путь:
+1. Создай актёра и привяжи его к фильму (`PUT localhost:5055/api/v1/movies/<movieId>/actors/<actorId>`).
+2. Удали актёра (`DELETE localhost:5056/api/v1/actors/<actorId>`).
+3. `GET localhost:5055/api/v1/movies/<movieId>/actors` — актёра в списке нет.
+
+Но пока это ещё ничего не доказывает: связи по-прежнему удаляет и FK с каскадом. Убираем его.
+
+### 7.18. Шаг 13 — миграция: убрать внешний ключ на actors
+
+**Шаг 13.1.** Посмотри точное имя ограничения:
+
+```bash
+docker compose exec golang-kp-postgres psql -U golang_kp -d golang_kp -c '\d golang_kp.movie_actors'
+```
+
+В разделе `Foreign-key constraints` будет что-то вроде `movie_actors_actor_id_fkey`.
+Postgres по умолчанию называет так: `<таблица>_<колонка>_fkey`.
+
+**Шаг 13.2.**
+
+```bash
+make migrate-create seq=drop_movie_actors_actor_fk
+```
+
+`000007_drop_movie_actors_actor_fk.up.sql`:
+
+```sql
+ALTER TABLE golang_kp.movie_actors DROP CONSTRAINT movie_actors_actor_id_fkey;
+```
+
+`000007_drop_movie_actors_actor_fk.down.sql` — вернуть как было:
+
+```sql
+ALTER TABLE golang_kp.movie_actors
+    ADD CONSTRAINT movie_actors_actor_id_fkey
+    FOREIGN KEY (actor_id) REFERENCES golang_kp.actors (id) ON DELETE CASCADE;
+```
+
+**Шаг 13.3.** `make migrate-up`
+
+Внешний ключ на `movies` **оставляем**: `movie_actors` и `movies` — обе таблицы movies-service, они останутся в одной базе.
+
+**Почему этот шаг последний.** Если убрать FK раньше, чем заработает consumer, то каждое удаление актёра
+в промежутке оставляло бы мусорные связи. Сейчас замена уже работает, и старый механизм можно выключать.
+
+### 7.19. Почему BatchGetActors может вернуть меньше актёров, чем было id
+
+Это ответ на вопрос из 6.7. Представь, что два действия случились почти одновременно:
+
+```
+t1  movies:   AddMovieActor → gRPC GetActor(10) → «актёр есть»
+t2  actors:   DELETE актёра 10 + запись в outbox
+t3  movies:   INSERT INTO movie_actors (1, 10)          ← актёра уже нет!
+t4  movies:   consumer получил actor.deleted(10) → DELETE связей   ← мусор убран
+```
+
+Между t2 и t4 в `movie_actors` лежит id актёра, которого уже нет. Обычно это доли секунды,
+но если Kafka лежит, то может быть и час. Если в этот момент кто-то запросит `GET /movies/1/actors`,
+`BatchGetActors` просто не найдёт актёра 10 и вернёт остальных.
+
+Это и есть **eventual consistency**: данные двух сервисов какое-то время расходятся, но в итоге сходятся.
+Заметь, что гонку t1→t3 закрывает то же самое событие: DELETE в consumer выполнится после INSERT.
+Поэтому `GetMovieActors` возвращает только найденных актёров и не считает это ошибкой.
+
+**В этом и есть цена разделения:** раньше FK гарантировал целостность всегда и мгновенно, теперь — только «в итоге».
+
+### 7.20. Шаг 14 — проверка Kafka-части
+
+Запусти всё в трёх терминалах:
+
+```bash
+make run-actors                          # терминал 1
+make run-movies                          # терминал 2
+make kafka-tail topic=actors.events      # терминал 3
+```
+
+| # | Что делаешь | Что должно получиться | Что это доказывает |
+|---|---|---|---|
+| 1 | Привяжи актёра к фильму, удали актёра | в терминале 3 — событие; в логе movies — «связи актера удалены»; у фильма актёра нет | вся цепочка работает |
+| 2 | Останови movies-service (Ctrl+C), удали другого актёра с фильмами, запусти movies снова | после старта связи удалились | Kafka хранит события, пока получатель выключен |
+| 3 | `docker compose stop golang-kp-kafka`, удали актёра | ответ **204**; в `outbox` строка с пустым `published_at`; в логе actors — ошибки relay раз в секунду | удаление не зависит от Kafka |
+| 4 | `docker compose start golang-kp-kafka` | через пару секунд событие в топике, `published_at` заполнен, связи удалены | relay доотправил накопленное |
+| 5 | Ctrl+C у movies-service | в логах «Shutting down», без паник | errgroup корректно гасит HTTP и consumer |
+
+Сценарии 2–4 — самое ценное в этом разделе. Обязательно прогони их руками.
+
+**Самопроверка:**
+1. Почему relay держит транзакцию открытой, пока ждёт ответа Kafka? Что было бы, если сначала поставить
+   `published_at`, закоммитить, а потом отправлять?
+2. Таблица `outbox` растёт бесконечно. Как бы ты её чистил? (Подсказка: фоновое удаление строк,
+   у которых `published_at` старше N дней.)
+3. Почему `RemoveActorLinks` не возвращает `ErrNotFound`, когда удалено 0 строк?
+4. Что случится, если в `handle` для битого JSON вернуть ошибку вместо `nil`?
+5. Запустили две реплики movies-service. Сколько раз удалятся связи по одному событию? А если запустить search-service
+   со своей группой?
+
+---
+
+## 8. Шаг 4 — раздельные базы данных
+
+### 8.1. Что мы делаем
+
+К этому моменту movies-service уже **не читает и не пишет** таблицы `actors` и `outbox`: актёров получает по gRPC,
+об удалениях узнаёт из Kafka. Связь между сервисами осталась только физическая: таблицы лежат в одной базе.
+Теперь переносим таблицы actors-service в отдельную базу `golang_kp_actors`.
+
+```
+Было:  Postgres ─ база golang_kp ─ movies, movie_actors, actors, outbox   ← обоим сервисам
+Стало: Postgres ─ база golang_kp        ─ movies, movie_actors            ← только movies-service
+              └─ база golang_kp_actors ─ actors, outbox                   ← только actors-service
+```
+
+Сервер Postgres остаётся один (контейнер `golang-kp-postgres`), баз в нём становится две.
+Для изоляции важна именно **отдельная база**, к которой другой сервис не подключается.
+На одном сервере она или на разных — вопрос нагрузки и денег. В проде часто один кластер Postgres и много баз.
+
+| # | Что делаем | Как проверить |
+|---|---|---|
+| 1 | Разложить миграции по папкам сервисов | — |
+| 2 | Научить `Makefile` работать с папкой и базой конкретного сервиса | `make migrate-action svc=movies action=version` → 7 |
+| 3 | Миграции для базы actors | — |
+| 4 | Создать базу и накатить миграции | `\dt golang_kp.*` в новой базе |
+| 5 | Перенести данные | количество актёров совпадает |
+| 6 | Переключить actors-service на новую базу | `GET /actors` работает |
+| 7 | Удалить `actors` и `outbox` из базы movies | всё работает, как раньше |
+
+### 8.2. Шаг 1 — миграции по папкам
+
+```bash
+mkdir -p migrations/movies migrations/actors
+git mv migrations/0000*.sql migrations/movies/
+```
+
+Все существующие миграции (000001–000007) относятся к базе movies: именно в ней они уже накатаны.
+golang-migrate хранит номер последней накатанной миграции в таблице `schema_migrations` **внутри базы**,
+поэтому перенос файлов в другую папку ничего не ломает: номер в базе остаётся 7.
+
+### 8.3. Шаг 2 — Makefile с параметром svc
+
+Теперь каждая команда миграций должна знать **какой сервис**: от этого зависят папка и база.
+Передаём это параметром: `make migrate-up svc=actors`.
+
+Вверху `Makefile`, после `export`, добавь имена баз:
 
 ```make
 DB_movies := ${POSTGRES_DB}
 DB_actors := golang_kp_actors
+```
 
-# make migrate-up svc=actors
-migrate-up:
-	@make migrate-action svc=$(svc) action=up n=$(n)
+Приём `$(DB_$(svc))` — «переменная в имени переменной»: при `svc=actors` он превращается в `$(DB_actors)`,
+то есть `golang_kp_actors`.
 
-migrate-action:
-	# ...как было, только:
-	#   -path /migrations/$(svc)
-	#   .../$(DB_$(svc))?sslmode=disable...
+Замени цели миграций целиком:
+
+```make
+check-svc:
+	@if [ "$(svc)" != "movies" ] && [ "$(svc)" != "actors" ]; then \
+	    echo "Укажи сервис: svc=movies или svc=actors"; \
+	    exit 1; \
+	fi
 
 db-create-actors:
 	@docker compose exec -T golang-kp-postgres \
 		psql -U ${POSTGRES_USER} -d ${POSTGRES_DB} -c "CREATE DATABASE ${DB_actors};"
+
+migrate-create: check-svc
+	@if [ -z "$(seq)" ]; then \
+	    echo "Отсутствует обязательный параметр seq. Пример: make migrate-create svc=movies seq=init"; \
+	    exit 1; \
+	fi; \
+	docker compose run --rm golang-kp-migrate \
+		create \
+		-ext sql \
+		-dir /migrations/$(svc) \
+		-seq "$(seq)"
+
+migrate-up:
+	@make migrate-action svc=$(svc) action=up n=$(n)
+
+migrate-down:
+	@make migrate-action svc=$(svc) action=down n=$(if $(n),$(n),1)
+
+migrate-ensure-schema: check-svc
+	@docker compose exec -T golang-kp-postgres \
+		psql -U ${POSTGRES_USER} -d $(DB_$(svc)) -v ON_ERROR_STOP=1 \
+		-c "CREATE SCHEMA IF NOT EXISTS golang_kp;" > /dev/null
+
+migrate-action: check-svc
+	@if [ -z "$(action)" ]; then \
+	    echo "Отсутствует обязательный параметр action."; \
+		exit 1; \
+	fi; \
+	make migrate-ensure-schema svc=$(svc) && \
+	docker compose run --rm golang-kp-migrate \
+		-path /migrations/$(svc) \
+		-database "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@golang-kp-postgres:5432/$(DB_$(svc))?sslmode=disable&search_path=golang_kp" \
+		$(action) $(n)
 ```
 
-`migrate-ensure-schema` тоже должен работать с `-d $(DB_$(svc))`. `migrate-create` — с `-dir /migrations/$(svc)`.
+Что изменилось по сравнению со старой версией:
+- `check-svc` не даёт запустить миграцию, забыв указать сервис;
+- `-dir /migrations/$(svc)` и `-path /migrations/$(svc)` — папка сервиса. В `docker-compose.yaml` монтируется вся папка
+  `migrations`, поэтому подпапки видны внутри контейнера без правок;
+- `$(DB_$(svc))` вместо `${POSTGRES_DB}` — база сервиса.
 
-### 8.2. Перенос данных
+**Проверка:**
 
 ```bash
-# 1. Останови actors-service и убедись, что outbox пуст (relay всё отправил):
-#    SELECT count(*) FROM golang_kp.outbox WHERE published_at IS NULL;  → 0
+make migrate-action svc=movies action=version
+```
 
+Должно напечатать `7`. Значит, Makefile смотрит в правильную папку и базу.
+
+### 8.4. Шаг 3 — миграции для базы actors
+
+В новой базе нужны таблицы `actors` и `outbox`. SQL для них у тебя уже есть, его можно скопировать:
+
+```bash
+cp migrations/movies/000003_add_actor_entity.up.sql   migrations/actors/000001_add_actor_entity.up.sql
+cp migrations/movies/000003_add_actor_entity.down.sql migrations/actors/000001_add_actor_entity.down.sql
+cp migrations/movies/000006_add_outbox.up.sql         migrations/actors/000002_add_outbox.up.sql
+cp migrations/movies/000006_add_outbox.down.sql       migrations/actors/000002_add_outbox.down.sql
+```
+
+Нумерация в `migrations/actors` своя и начинается с 000001: у каждой базы своя история миграций.
+
+### 8.5. Шаг 4 — создать базу и накатить миграции
+
+```bash
 make db-create-actors
 make migrate-up svc=actors
+```
 
-# 2. Перелить данные
+Проверка:
+
+```bash
+docker compose exec golang-kp-postgres psql -U golang_kp -d golang_kp_actors -c '\dt golang_kp.*'
+```
+
+Должны быть таблицы `actors`, `outbox` и служебная `schema_migrations`. Пока пустые.
+
+### 8.6. Шаг 5 — перенести данные
+
+**Шаг 5.1. Останови actors-service.** Пока он работает, кто-нибудь может создать актёра в старой базе, и он не переедет.
+
+**Шаг 5.2. Убедись, что relay всё отправил:**
+
+```bash
+docker compose exec golang-kp-postgres psql -U golang_kp -d golang_kp \
+  -c 'SELECT count(*) FROM golang_kp.outbox WHERE published_at IS NULL;'
+```
+
+Должно быть `0`. Таблицу `outbox` мы не переносим: отправленные события больше не нужны.
+Если там что-то осталось, запусти actors-service, подожди пару секунд и снова останови.
+
+**Шаг 5.3. Скопируй актёров** из старой базы в новую:
+
+```bash
 docker compose exec -T golang-kp-postgres \
   pg_dump -U golang_kp -d golang_kp --data-only -t golang_kp.actors \
 | docker compose exec -T golang-kp-postgres \
   psql -U golang_kp -d golang_kp_actors
-
-# 3. Счётчик id — иначе следующий INSERT получит id=1 и упадёт на PRIMARY KEY
-#    (в psql к golang_kp_actors)
-SELECT setval('golang_kp.actors_id_seq', (SELECT max(id) FROM golang_kp.actors));
 ```
 
-4. В `run-actors` поменяй `POSTGRES_DB=golang_kp_actors`, запусти actors-service и проверь ручки.
-5. Только теперь `make migrate-up svc=movies`: удаление `actors` и `outbox` из старой БД.
+`pg_dump --data-only -t golang_kp.actors` выгружает **только данные** одной таблицы в виде SQL.
+Вертикальная черта `|` передаёт этот SQL в `psql`, подключённый к новой базе. Структура таблицы там уже есть (шаг 4).
 
-В проде такой перенос делают без остановки сервиса: двойная запись в старую и новую БД, фоновое копирование,
-сверка, переключение чтения. Или через CDC (Debezium). Для учебного проекта хватит остановки на минуту.
+**Шаг 5.4. Сдвинь счётчик id.** У колонки `id SERIAL` есть счётчик (sequence), который выдаёт следующий id.
+В новой базе он начинается с 1, и следующий `INSERT` упадёт: актёр с `id = 1` уже есть.
 
-**Почему одна Postgres, а не две.** Для изоляции важна **логическая** граница: своя БД (или хотя бы своя схема и свой
-пользователь), к которой у другого сервиса нет доступа. Будет ли она на отдельном сервере — вопрос нагрузки и денег.
-В проде часто так и делают: один кластер Postgres, много баз.
+```bash
+docker compose exec golang-kp-postgres psql -U golang_kp -d golang_kp_actors \
+  -c "SELECT setval('golang_kp.actors_id_seq', (SELECT max(id) FROM golang_kp.actors));"
+```
+
+**Шаг 5.5. Сверь количество** в старой и новой базе:
+
+```bash
+docker compose exec golang-kp-postgres psql -U golang_kp -d golang_kp        -c 'SELECT count(*) FROM golang_kp.actors;'
+docker compose exec golang-kp-postgres psql -U golang_kp -d golang_kp_actors -c 'SELECT count(*) FROM golang_kp.actors;'
+```
+
+### 8.7. Шаг 6 — переключить actors-service на новую базу
+
+В `Makefile`, в цели `run-actors`, добавь базу:
+
+```make
+run-actors:
+	@export LOGGER_FOLDER=${PROJECT_ROOT}/out/logs/actors && \
+	export POSTGRES_HOST=localhost && \
+	export POSTGRES_DB=${DB_actors} && \
+	export HTTP_ADDRESS=:5056 && \
+	go run ${PROJECT_ROOT}/cmd/actors-service
+```
+
+Код менять не нужно: `core_pgx_pool` и так читает имя базы из `POSTGRES_DB`.
+
+Запусти `make run-actors` и проверь: `curl localhost:5056/api/v1/actors` возвращает тех же актёров;
+создание нового актёра получает следующий id, а не 1.
+
+### 8.8. Шаг 7 — убрать actors и outbox из базы movies
+
+Делаем это **последним**, когда уже проверили, что actors-service работает с новой базой. До этого момента
+старые таблицы — резервная копия: если что-то пошло не так, можно вернуть `POSTGRES_DB` и откатиться.
+
+```bash
+make migrate-create svc=movies seq=drop_actors_and_outbox
+```
+
+`000008_drop_actors_and_outbox.up.sql`:
+
+```sql
+DROP TABLE golang_kp.outbox;
+DROP TABLE golang_kp.actors;
+```
+
+`000008_drop_actors_and_outbox.down.sql` — восстановить структуру (данные, конечно, не вернутся).
+Скопируй сюда содержимое `000003_add_actor_entity.up.sql` и `000006_add_outbox.up.sql`.
+
+```bash
+make migrate-up svc=movies
+```
+
+`DROP TABLE actors` пройдёт только потому, что на шаге 13 раздела 7 ты убрал внешний ключ `movie_actors → actors`.
+Иначе Postgres не дал бы удалить таблицу, на которую кто-то ссылается.
+
+**Проверка:** запусти оба сервиса и прогони сценарии из раздела 9.
+
+**Как это делают в проде.** Там нельзя остановить сервис даже на минуту, поэтому переезд растягивают на несколько шагов:
+пишут в старую и новую базу одновременно, копируют старые данные в фоне, сверяют, переключают чтение на новую
+и только потом выключают старую. Или используют CDC (Debezium). Для учебного проекта остановки на минуту достаточно.
+
+---
 
 ## 9. Проверка всего вместе
 
 ```bash
-make env-up && make kafka-create-topics
-make run-actors     # терминал 1
-make run-movies     # терминал 2
-make kafka-tail topic=actors.events   # терминал 3
+make env-up
+make kafka-create-topics                 # если топика ещё нет
+make run-actors                          # терминал 1
+make run-movies                          # терминал 2
+make kafka-tail topic=actors.events      # терминал 3
 ```
 
-Сценарии. Каждый показывает, **зачем** нужна соответствующая часть:
+Каждый сценарий показывает, **зачем** нужна соответствующая часть системы:
 
-| Сценарий | Ожидание | Что демонстрирует |
-|---|---|---|
-| Привязать актёра 999 к фильму | 404 | gRPC вместо FK |
-| `GET /movies/1/actors` | актёры с данными | BatchGetActors вместо JOIN |
-| Удалить актёра | в терминале 3 появилось событие, связи у фильмов исчезли | Kafka вместо CASCADE |
-| Останови actors-service, `GET /movies/1/actors` | **503**, movies-service жив | синхронная зависимость, ретраи, FromStatus |
-| Останови **movies-service**, удали актёра, запусти movies | связи удалятся после старта | Kafka хранит события, пока получатель лежит |
-| `docker compose stop golang-kp-kafka`, удали актёра | **204**, в `outbox` строка с `published_at IS NULL` | outbox: удаление не зависит от Kafka |
-| `docker compose start golang-kp-kafka` | через секунду событие в топике, связи удалены | relay дослал |
-| Ctrl+C у movies-service | в логе «Shutting down» у HTTP и consumer, без паник | graceful shutdown через errgroup |
+| # | Что делаешь | Что должно получиться | Что это доказывает |
+|---|---|---|---|
+| 1 | `PUT localhost:5055/api/v1/movies/1/actors/999` (такого актёра нет) | 404 | gRPC `GetActor` вместо FK |
+| 2 | `GET localhost:5055/api/v1/movies/1/actors` | актёры с именами и датами | gRPC `BatchGetActors` вместо JOIN |
+| 3 | `DELETE localhost:5056/api/v1/actors/<id>` | событие в терминале 3, связи у фильмов исчезли | Kafka вместо `ON DELETE CASCADE` |
+| 4 | Останови actors-service, повтори сценарий 2 | **503**, movies-service при этом жив | синхронная зависимость: ретраи, `FromStatus` |
+| 5 | Останови **movies-service**, удали актёра, запусти movies | связи удалятся после старта | Kafka хранит события, пока получатель выключен |
+| 6 | `docker compose stop golang-kp-kafka`, удали актёра | **204**, в `outbox` строка с пустым `published_at` | outbox: удаление не зависит от Kafka |
+| 7 | `docker compose start golang-kp-kafka` | через пару секунд событие в топике, связи удалены | relay доотправил накопленное |
+| 8 | Ctrl+C у обоих сервисов | «Shutting down» в логах, без паник | graceful shutdown через errgroup |
 
-Сценарии 4–7 — самое ценное в разборе. Обязательно прогони их руками.
+Сценарии 4–7 — самое ценное. Обязательно прогони их руками.
 
 ## 10. Как это делают в реальных проектах
 
@@ -1478,7 +2151,7 @@ make kafka-tail topic=actors.events   # терминал 3
 
 | В монолите | В сервисах | Цена |
 |---|---|---|
-| FK | gRPC `GetActor` | сетевой вызов, 503 при недоступности, гонка (7.7) |
+| FK | gRPC `GetActor` | сетевой вызов, 503 при недоступности, гонка (7.19) |
 | JOIN | gRPC `BatchGetActors` | второй запрос, обязательный batch |
 | `ON DELETE CASCADE` | outbox → Kafka → consumer | таблица outbox, relay, идемпотентность, eventual consistency |
 | одна транзакция | транзакция на сервис + события | at-least-once, дубли, порядок только внутри партиции |

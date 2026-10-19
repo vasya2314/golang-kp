@@ -67,6 +67,11 @@ type MovieRepository interface {
 		movieID int,
 		actorID int,
 	) error
+
+	RemoveActorLinks(
+		ctx context.Context,
+		actorID int,
+	) error
 }
 
 func NewMovieService(movieRepository MovieRepository, fileStorage FileStorage, actorProvider ActorProvider) *MovieService {

@@ -4,10 +4,10 @@ export
 export PROJECT_ROOT=${shell pwd}
 
 env-up:
-	@docker compose up -d golang-kp-postgres golang-kp-s3
+	@docker compose up -d golang-kp-postgres golang-kp-s3 golang-kp-kafka
 
 env-down:
-	@docker compose down golang-kp-postgres golang-kp-s3
+	@docker compose down golang-kp-postgres golang-kp-s3 golang-kp-kafka
 
 env-cleanup:
 	@read -p "Очистить все volume файлы окружения? Опасность утери данных. [Y/N]: " ans; \
